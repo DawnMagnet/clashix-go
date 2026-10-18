@@ -83,7 +83,7 @@ func Read(exePath string) (files map[string][]byte, ok bool, err error) {
 }
 
 // Write copies srcExe to dstExe, removes an existing payload, appends files as
-// a tar payload, and leaves dstExe executable (mode 0755).
+// a tar payload, and leaves dstExe executable and private (mode 0700).
 func Write(srcExe, dstExe string, files map[string][]byte) error {
 	src, err := os.Open(srcExe)
 	if err != nil {
@@ -169,7 +169,7 @@ func Write(srcExe, dstExe string, files map[string][]byte) error {
 	if _, err := tmp.Write(trailer[:]); err != nil {
 		return fmt.Errorf("write payload trailer: %w", err)
 	}
-	if err := tmp.Chmod(0o755); err != nil {
+	if err := tmp.Chmod(0o700); err != nil {
 		return fmt.Errorf("set executable mode on %q: %w", tmpPath, err)
 	}
 	if err := tmp.Sync(); err != nil {

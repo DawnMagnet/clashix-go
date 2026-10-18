@@ -122,6 +122,10 @@ proxies:
     type: ss
     username: alice
     password: hunter2
+proxy-providers:
+  remote:
+    type: http
+    url: https://provider-user:provider-pass@example.test/sub
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -136,7 +140,7 @@ proxies:
 	}
 
 	output := out.String()
-	for _, secret := range []string{"super-controller-secret", "alice", "hunter2"} {
+	for _, secret := range []string{"super-controller-secret", "alice", "hunter2", "provider-user", "provider-pass"} {
 		if strings.Contains(output, secret) {
 			t.Errorf("config show leaked %q:\n%s", secret, output)
 		}
@@ -537,5 +541,39 @@ func TestRunGeneratesSecretWithController(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
 		t.Errorf("run did not log the generated secret: %q", stderr.String())
+	}
+}
+
+func TestRunDisablesAlternateControllers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	content := `mixed-port: 0
+mode: rule
+external-controller-tls: 127.0.0.1:9443
+external-controller-unix: /tmp/cx.sock
+external-controller-pipe: \\.\pipe\cx
+proxies: []
+rules:
+  - MATCH,DIRECT
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := NewRoot("dev")
+	root.SetArgs([]string{"run", "--config", configPath, "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil || lastFakeCore.config == nil {
+		t.Fatal("core did not receive a configuration")
+	}
+	for _, key := range []string{"external-controller-tls", "external-controller-unix", "external-controller-pipe"} {
+		if _, exists := lastFakeCore.config[key]; exists {
+			t.Errorf("run kept alternate controller key %q", key)
+		}
 	}
 }

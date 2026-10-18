@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"net/url"
+	"strings"
+)
 
 // Redacted replaces sensitive values in output produced by "cx config show".
 const Redacted = "REDACTED"
@@ -45,7 +48,24 @@ func redactValue(value any) any {
 			out[i] = redactValue(item)
 		}
 		return out
+	case string:
+		if redacted, ok := redactURLUserinfo(value); ok {
+			return redacted
+		}
+		return value
 	default:
 		return value
 	}
+}
+
+func redactURLUserinfo(value string) (string, bool) {
+	if !strings.Contains(value, "://") {
+		return value, false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value, false
+	}
+	parsed.User = url.User(Redacted)
+	return parsed.String(), true
 }

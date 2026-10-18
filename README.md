@@ -156,7 +156,8 @@ cx-private run -- curl https://example.com
 `--geodata` picks the known files `geoip.metadb`, `geoip.dat`, `geosite.dat`,
 `GeoLite2-ASN.mmdb`, and `ASN.mmdb` from the directory. Subscriptions are
 resolved at pack time; subscription URLs are never embedded. The resulting
-binary uses its embedded config and geodata with no flags.
+binary is written with mode `0700` and uses its embedded config and geodata with
+no flags.
 
 `cx pack` strips the controller `secret` from the embedded config and prints a
 note. A later `cx serve` from that binary generates a fresh secret at startup if
@@ -333,7 +334,8 @@ cx-private run -- curl https://example.com
 
 `--geodata` 只从目录中挑选已知文件：`geoip.metadb`、`geoip.dat`、
 `geosite.dat`、`GeoLite2-ASN.mmdb`、`ASN.mmdb`。订阅在打包时解析，订阅 URL
-不会写入二进制。产物无需任何参数即可使用内嵌配置和 geodata 执行 `run`。
+不会写入二进制。产物以 `0700` 权限写入，无需任何参数即可使用内嵌配置和
+geodata 执行 `run`。
 
 `cx pack` 会从内嵌配置中删除控制器 `secret` 并打印提示。之后用该二进制运行
 `cx serve` 时，如果启用了外部控制器，会在启动时生成新的随机 secret。

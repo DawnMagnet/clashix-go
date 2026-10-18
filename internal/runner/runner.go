@@ -43,10 +43,6 @@ func New(options Options) *Runner {
 // group, and returns its exit code. A child that exits non-zero is reported
 // through the returned code, not as an error.
 func (r *Runner) Run(ctx context.Context, name string, args []string) (int, error) {
-	if err := ctx.Err(); err != nil {
-		return -1, err
-	}
-
 	cmd := exec.Command(name, args...)
 	cmd.Env = r.Options.Env
 	cmd.Stdin = r.Options.Stdin
@@ -63,6 +59,14 @@ func (r *Runner) Run(ctx context.Context, name string, args []string) (int, erro
 	}
 	isolateGroup := shouldIsolateProcessGroup(cmd.Stdin)
 	configureProcessGroup(cmd, isolateGroup)
+	return r.runCommand(ctx, cmd, isolateGroup)
+}
+
+func (r *Runner) runCommand(ctx context.Context, cmd *exec.Cmd, isolateGroup bool) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return -1, err
+	}
+	name := cmd.Args[0]
 
 	signalCh := make(chan os.Signal, 8)
 	signal.Notify(signalCh, forwardedSignals()...)
@@ -82,12 +86,26 @@ func (r *Runner) Run(ctx context.Context, name string, args []string) (int, erro
 		grace = DefaultGracePeriod
 	}
 
-	var graceTimer *time.Timer
-	var graceC <-chan time.Time
-	startGrace := func() {
+	type escalation int
+	const (
+		escalationNone escalation = iota
+		escalationTTYInterrupt
+		escalationKill
+	)
+
+	var (
+		graceTimer *time.Timer
+		graceC     <-chan time.Time
+		stage      escalation
+	)
+	startGrace := func(next escalation) {
 		if graceTimer != nil {
+			if next == escalationKill {
+				stage = escalationKill
+			}
 			return
 		}
+		stage = next
 		graceTimer = time.NewTimer(grace)
 		graceC = graceTimer.C
 	}
@@ -111,23 +129,35 @@ func (r *Runner) Run(ctx context.Context, name string, args []string) (int, erro
 			return -1, fmt.Errorf("wait for %q: %w", name, err)
 		case sig := <-signalCh:
 			// With a terminal on stdin the child shares our foreground process
-			// group, so the terminal has already delivered SIGINT to it.
+			// group, so the terminal has already delivered SIGINT to it. Do not
+			// double-forward SIGINT, but start escalation in case it ignores it.
 			if sig == os.Interrupt && !isolateGroup {
+				startGrace(escalationTTYInterrupt)
 				continue
 			}
 			// Best effort: the child may have exited between Wait and forwarding.
 			_ = signalChild(cmd.Process, sig, isolateGroup)
 			if isTerminationSignal(sig) {
-				startGrace()
+				startGrace(escalationKill)
 			}
 		case <-graceC:
-			_ = killChild(cmd.Process, isolateGroup)
 			graceC = nil
+			if stage == escalationTTYInterrupt {
+				// The terminal already sent SIGINT. Give the child a second
+				// chance with SIGTERM before forcing it down.
+				_ = signalChild(cmd.Process, syscall.SIGTERM, false)
+				stage = escalationKill
+				graceTimer.Reset(grace)
+				graceC = graceTimer.C
+				continue
+			}
+			_ = killChild(cmd.Process, isolateGroup)
+			stage = escalationNone
 		case <-ctxDone:
 			ctxDone = nil
 			// Best effort: the child may already be gone.
 			_ = signalChild(cmd.Process, syscall.SIGTERM, isolateGroup)
-			startGrace()
+			startGrace(escalationKill)
 		}
 	}
 }

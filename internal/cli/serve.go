@@ -197,6 +197,10 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Run mode exposes only the explicitly requested main controller.
+			for _, key := range []string{"external-controller-tls", "external-controller-unix", "external-controller-pipe"} {
+				delete(cfg, key)
+			}
 			secret, generated, err := ensureControllerSecret(cfg, "")
 			if err != nil {
 				return err
@@ -234,6 +238,9 @@ func newRunCmd() *cobra.Command {
 			mixedAddress := fmt.Sprintf("127.0.0.1:%d", mixedPort)
 			if err := core.WaitReady(ctx, mixedAddress, core.DefaultReadyTimeout); err != nil {
 				return fmt.Errorf("proxy did not become ready: %w", err)
+			}
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			return runChild(cmd, args, mixedPort)
 		},

@@ -53,8 +53,8 @@ func TestWriteAndReadPayload(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if info.Mode().Perm()&0o111 == 0 {
-			t.Errorf("packed binary mode = %o, want executable", info.Mode().Perm())
+		if info.Mode().Perm() != 0o700 {
+			t.Errorf("packed binary mode = %o, want 700", info.Mode().Perm())
 		}
 	}
 
