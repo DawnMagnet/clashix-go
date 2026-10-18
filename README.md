@@ -119,10 +119,12 @@ SPEC forms:
   group specs run after bare patterns and win, and only these errors name the
   selected group.
 
-Closest candidates are ranked by the number of shared words/aliases, then by a
-protocol (`type:`) match, then by the original group order. If a pattern matches
-proxies that exist under top-level `proxies` but are members of no select group,
-the error says so explicitly and lists them.
+Closest candidates are ranked by real similarity: a protocol/type match first
+(a bare word equal to a proxy type counts, so `trojan` ranks nodes whose `type`
+is `trojan`), then a region alias match, then shared tokens, then normalized
+longest common substring and shared characters, and finally the original group
+order. If a pattern matches proxies that exist under top-level `proxies` but are
+members of no select group, the error says so explicitly and lists them.
 
 A pattern starting with `re:` is a case-insensitive Go regular expression.
 Otherwise every whitespace-separated word must match the candidate name with a
@@ -157,11 +159,15 @@ succeeds. `--sub-interval 6h` periodically refreshes subscriptions and reloads.
 
 When any network controller endpoint (`external-controller` or
 `external-controller-tls`) is enabled and the effective config has no secret,
-`cx serve` generates a random controller secret at startup and prints it to
-stderr once so you can log in. A non-empty `secret` in the config, `CX_SECRET`,
-or `--secret` always wins. When no controller is enabled, no secret is added.
-Binding a non-loopback controller without a configured secret prints an
-additional warning.
+`cx serve` generates a random controller secret at startup, persists it in
+`<state-dir>/controller-secret` (mode `0600`, written atomically), and logs only
+that file path so the secret does not end up in journald. A non-empty
+`controller-secret` file is reused across restarts. A non-empty `secret` in the
+config, `CX_SECRET`, or `--secret` always wins. When no controller is enabled,
+no secret is added. Binding a non-loopback controller without a configured
+secret prints an additional warning. Startup and reload finish loading
+proxy/rule providers and trigger a bounded initial health check for URL-test and
+fallback groups before reporting the configuration as active.
 
 The built-in metacubexd panel is served at `/ui/` whenever a controller is
 enabled and the binary was built with `-tags ui`. The boolean `--ui` flag (or a
@@ -268,11 +274,15 @@ If TUN was requested but did not come up, startup logs the underlying mihomo
 error (for example `configure tun interface: operation not permitted`) and the
 likely causes (missing `CAP_NET_ADMIN`/root, a missing or blocked
 `/dev/net/tun` such as a device cgroup/`PrivateDevices`, or a gVisor/mixed stack
-that was not compiled in), then exits non-zero. A failed reload logs the error,
-re-applies the previous working configuration, and keeps the service alive.
+that was not compiled in), then exits non-zero. If the device is busy
+(`EBUSY`/`device or resource busy`), the error names the TUN device as already
+in use by another process or cx instance and suggests `--tun-device NAME`. A
+failed reload logs the error, re-applies the previous working configuration,
+and keeps the service alive.
 
-The flags are `--tun`, `--tun-stack system|gvisor|mixed`, and repeatable
-`--tun-exclude CIDR`; they override the config/override/`tun` section. On a
+The flags are `--tun`, `--tun-stack system|gvisor|mixed`, `--tun-device NAME`,
+and repeatable `--tun-exclude CIDR`; they override the
+config/override/`tun` section. On a
 public server, exclude private, loopback, link-local, multicast, broadcast,
 CGNAT, and metadata ranges, and keep local/cloud names out of fake-IP. A
 ready-to-merge fragment with system stack, automatic routing/interface
@@ -294,10 +304,15 @@ and use `fake-ip-filter` for `*.lan`, `*.local`, `+.localhost`, `+.internal`,
 and local/cloud domains. Never route cloud metadata traffic through a
 third-party proxy.
 
-When TUN is not enabled, `cx` detects a host TUN on the default route on Linux,
-macOS, and Windows. If `interface-name` and `routing-mark` are not already set,
-it binds outbound sockets (including DNS) to the physical default interface and
-logs once to stderr:
+When TUN is not enabled, `cx` detects a host TUN on the effective route. On
+Linux this uses netlink `RTM_GETROUTE` lookups for `1.1.1.1` and
+`2606:4700:4700::1111`, so policy routing (for example sing-tun rules pointing
+at table 2022) is honored instead of only reading the main table. When the
+effective device is a TUN, the physical interface is taken from the main table
+(254) default route. macOS and Windows keep their platform routing-table
+readers. If `interface-name` and `routing-mark` are not already set, `cx` binds
+outbound sockets (including DNS) to the physical default interface and logs
+once to stderr:
 `cx run: host TUN detected (dev Meta); binding outbound to eth0`. This prevents
 a non-TUN `cx run` from being captured by another `cx serve --tun`. Use
 `--interface NAME` to force an interface, `--routing-mark N` to force a routing
@@ -349,7 +364,10 @@ Run-mode log level defaults to `warning`; core logs are written only to stderr.
 External controller access is disabled unless `--controller ADDR`, `--ui`,
 `--ui-addr ADDR`, or `CX_UI`/`CX_UI_ADDR` is given. `--ui` enables the
 controller and the bundled panel; `--ui-addr` implies `--ui` and defaults to
-`127.0.0.1:9090`. As in `serve`, a missing secret is generated and printed once.
+`127.0.0.1:9090`. When a controller is enabled and no secret is configured,
+`cx run` prints the generated secret only if stderr is a terminal. Otherwise it
+writes `<temp-dir>/controller-secret` (mode `0600`) and logs that path; the
+temporary directory is removed when the command exits.
 
 ### Subscriptions
 
@@ -391,7 +409,8 @@ and geodata with no flags.
 
 `cx pack` strips the controller `secret` from the embedded config and prints a
 note. A later `cx serve` from that binary generates a fresh secret at startup if
-the external controller is enabled.
+the external controller is enabled, storing it in
+`<state-dir>/controller-secret`.
 
 > **Security warning:** a packed binary contains resolved proxy configuration
 > and credentials. Keep it private. Never commit, upload, publish, or share it.
@@ -537,9 +556,11 @@ SPEC 形式：
 - `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。精确组规则在裸模式之后
   执行，并且优先；只有这类错误会点名具体选择组。
 
-最接近候选的排序依次为：共享词/别名数量、协议（`type:`）匹配、原始组顺序。
-若模式匹配到存在于顶层 `proxies`、但不属于任何选择组的代理，错误信息会明确
-说明这一点并列出这些代理。
+最接近候选按真实相似度排序：先看协议/type 匹配（裸词等于代理 type 也算，
+例如 `trojan` 会优先列出 type 为 `trojan` 的节点），再看地区别名匹配、共享
+token、归一化最长公共子串与共享字符，最后才按原始组顺序。若模式匹配到存在于
+顶层 `proxies`、但不属于任何选择组的代理，错误信息会明确说明这一点并列出
+这些代理。
 
 以 `re:` 开头的模式是不区分大小写的 Go 正则；否则按空白拆分，每个词都必须
 不区分大小写地匹配候选名称的子串；但两字母地区代码必须作为完整 token 匹配，因此
@@ -569,10 +590,13 @@ cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
 `--sub-interval 6h` 可定期刷新订阅并重载。
 
 启用任一网络控制器端点（`external-controller` 或 `external-controller-tls`）
-且有效配置没有 secret 时，`cx serve` 会在启动时生成随机控制器 secret，并向
-stderr 打印一次，方便登录。配置中的非空 `secret`、`CX_SECRET` 或 `--secret`
-参数始终优先。未启用控制器时不会添加 secret。若控制器绑定非 loopback 地址且
-未配置 secret，还会打印额外警告。
+且有效配置没有 secret 时，`cx serve` 会在启动时生成随机控制器 secret，以原子
+方式写入 `<state-dir>/controller-secret`（权限 `0600`），并只向 stderr 打印该
+文件路径，避免 secret 进入 journald。文件非空时会在后续重启中继续复用。配置中
+的非空 `secret`、`CX_SECRET` 或 `--secret` 参数始终优先。未启用控制器时不会
+添加 secret。若控制器绑定非 loopback 地址且未配置 secret，还会打印额外警告。
+启动和重载会等待 proxy/rule provider 加载完成，并对 URL-test 与 fallback 组
+触发一次有界初始健康检查，然后再报告配置已生效。
 
 启用控制器且二进制使用 `-tags ui` 构建时，内置 metacubexd 面板会通过 `/ui/`
 提供。布尔标志 `--ui`（或布尔风格的 `CX_UI`，例如 `1`、`true`）会启用控制器
@@ -674,11 +698,13 @@ TUN 设备，并设置 `PrivateDevices=no`。
 但未成功启动，启动时会打印 mihomo 的底层错误（例如
 `configure tun interface: operation not permitted`）以及可能原因（缺少
 `CAP_NET_ADMIN`/root、`/dev/net/tun` 不存在或被设备 cgroup/`PrivateDevices`
-阻止、未编译 gVisor/mixed 栈），并以非零状态退出；重载时打印错误、重新应用
-上一份可用配置，并保持服务运行。
+阻止、未编译 gVisor/mixed 栈），并以非零状态退出。若设备忙
+（`EBUSY`/`device or resource busy`），错误会指明该 TUN 设备已被另一个进程或
+cx 实例占用，并建议使用 `--tun-device NAME`。重载时打印错误、重新应用上一份
+可用配置，并保持服务运行。
 
-相关参数为 `--tun`、`--tun-stack system|gvisor|mixed` 和可重复的
-`--tun-exclude CIDR`；它们优先于配置、覆盖文件和 `tun` 段。公网服务器应排除
+相关参数为 `--tun`、`--tun-stack system|gvisor|mixed`、`--tun-device NAME`
+和可重复的 `--tun-exclude CIDR`；它们优先于配置、覆盖文件和 `tun` 段。公网服务器应排除
 私有、loopback、链路本地、组播、广播、CGNAT 和元数据地址段，并让本地/云域名
 不进入 fake-IP。可直接合并的配置片段见
 [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml)，包含
@@ -698,9 +724,13 @@ cx serve --config config.yaml --tun --tun-stack system \
 `*.local`、`+.localhost`、`+.internal` 及本地/云域名。不要把云元数据流量
 路由到第三方代理。
 
-未启用 TUN 时，`cx` 会在 Linux、macOS 和 Windows 上检测默认路由是否经过宿主
-TUN。若配置中尚未设置 `interface-name`/`routing-mark`，它会把出站套接字
-（包括 DNS）绑定到真实物理默认网卡，并向 stderr 打印一行：
+未启用 TUN 时，`cx` 会检测实际生效的路由是否经过宿主 TUN。Linux 上使用
+netlink `RTM_GETROUTE` 查询 `1.1.1.1` 和 `2606:4700:4700::1111`，因此
+sing-tun 指向 table 2022 之类的策略路由也能被识别，而不是只读主路由表。
+若实际出口是 TUN，则从主路由表（254）的默认路由取物理网卡。macOS 和 Windows
+继续使用各自的平台路由表读取逻辑。若配置中尚未设置
+`interface-name`/`routing-mark`，它会把出站套接字（包括 DNS）绑定到真实物理
+默认网卡，并向 stderr 打印一行：
 `cx run: host TUN detected (dev Meta); binding outbound to eth0`。这样非 TUN 的
 `cx run` 不会被另一个 `cx serve --tun` 再次捕获。可用 `--interface NAME` 强制
 指定网卡，用 `--routing-mark N` 强制指定路由标记，用 `--interface=` 或
@@ -748,8 +778,9 @@ cx run --ui --ui-addr 127.0.0.1:9090 --config direct.yaml -- curl https://exampl
 `run` 模式日志等级默认为 `warning`，核心日志只写 stderr。除非传入
 `--controller ADDR`、`--ui`、`--ui-addr ADDR` 或设置 `CX_UI`/`CX_UI_ADDR`，
 否则外部控制器关闭。`--ui` 会启用控制器和内置面板；`--ui-addr` 隐含启用
-`--ui`，默认地址为 `127.0.0.1:9090`。与 `serve` 一样，缺少 secret 时会自动
-生成并打印一次。
+`--ui`，默认地址为 `127.0.0.1:9090`。启用控制器且未配置 secret 时，只有
+stderr 是终端才会打印生成的 secret；否则写入 `<临时目录>/controller-secret`
+（权限 `0600`）并打印该路径。命令退出时临时目录会被删除。
 
 ### 订阅
 
@@ -786,7 +817,8 @@ cx-private run -- curl https://example.com
 写入，无需任何参数即可使用内嵌配置和 geodata 执行 `run`。
 
 `cx pack` 会从内嵌配置中删除控制器 `secret` 并打印提示。之后用该二进制运行
-`cx serve` 时，如果启用了外部控制器，会在启动时生成新的随机 secret。
+`cx serve` 时，如果启用了外部控制器，会在启动时生成新的随机 secret，并存入
+`<state-dir>/controller-secret`。
 
 > **安全警告：** 打包后的二进制包含解析后的代理配置和凭据。必须保持私有，
 > 不要提交、上传、发布或分享。只要打包了代理、远程 proxy-provider 或任何订阅，

@@ -183,6 +183,45 @@ func TestClosestRanksByProtocolThenGroupOrder(t *testing.T) {
 	}
 }
 
+func TestClosestRanksProtocolAndRegionBeforeGroupOrder(t *testing.T) {
+	matcher, err := newMatcher("trojan hk")
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	candidates := []nodeCandidate{
+		{name: "🇺🇸 US 01", kind: "Trojan"},
+		{name: "🇯🇵 JP 01", kind: "Trojan"},
+		{name: "🇭🇰 HK 01", kind: "Shadowsocks"},
+		{name: "🇭🇰 HK 02", kind: "Trojan"},
+	}
+	got := closest(matcher, candidates, 4)
+	want := []string{"🇭🇰 HK 02", "🇯🇵 JP 01", "🇺🇸 US 01", "🇭🇰 HK 01"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("closest = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestClosestRanksBareTypeWord(t *testing.T) {
+	matcher, err := newMatcher("trojan")
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	candidates := []nodeCandidate{
+		{name: "🇭🇰 HK 01", kind: "Shadowsocks"},
+		{name: "🇭🇰 HK 02", kind: "Trojan"},
+		{name: "🇯🇵 JP 01", kind: "Trojan"},
+	}
+	got := closest(matcher, candidates, 3)
+	want := []string{"🇯🇵 JP 01", "🇭🇰 HK 02", "🇭🇰 HK 01"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("closest = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestApplyBarePatternReportsUngroupedProxies(t *testing.T) {
 	testProxyMap(t,
 		[]map[string]any{

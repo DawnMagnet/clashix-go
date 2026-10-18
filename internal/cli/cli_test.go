@@ -464,8 +464,28 @@ func TestServeGeneratesControllerSecret(t *testing.T) {
 	if !ok || secret == "" {
 		t.Fatalf("serve did not persist a generated secret: %#v", cfg["secret"])
 	}
-	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
-		t.Errorf("serve did not log the generated secret: %q", stderr.String())
+	path := controllerSecretPath(state)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read controller secret file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != secret {
+		t.Errorf("controller secret file = %q, want persisted secret", data)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("controller secret mode = %o, want 600", info.Mode().Perm())
+		}
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Errorf("serve leaked the controller secret to stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), path) {
+		t.Errorf("serve did not log the controller secret path: %q", stderr.String())
 	}
 
 	if _, generated, err := ensureControllerSecret(cfg, secret); err != nil || generated {
@@ -660,8 +680,74 @@ func TestRunGeneratesSecretWithController(t *testing.T) {
 	if secret == "" {
 		t.Fatal("run did not generate a controller secret")
 	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Errorf("run leaked the controller secret to stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "cx run: generated controller secret in ") {
+		t.Errorf("run did not log the controller secret path: %q", stderr.String())
+	}
+}
+
+func TestServeReusesControllerSecretFile(t *testing.T) {
+	useFakeCore(t)
+	state := t.TempDir()
+	const persisted = "persisted-controller-secret"
+	if _, err := writeControllerSecret(state, persisted); err != nil {
+		t.Fatalf("writeControllerSecret: %v", err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mixed-port: 0\nexternal-controller: 127.0.0.1:0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--config", configPath, "--dir", state})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil || lastFakeCore.config["secret"] != persisted {
+		t.Fatalf("serve secret = %#v, want the persisted file value", lastFakeCore.config["secret"])
+	}
+	if strings.Contains(stderr.String(), persisted) {
+		t.Errorf("serve leaked the persisted secret: %q", stderr.String())
+	}
+}
+
+func TestRunPrintsSecretOnTTYStderr(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	oldTerminal := stderrIsTerminal
+	stderrIsTerminal = func() bool { return true }
+	t.Cleanup(func() { stderrIsTerminal = oldTerminal })
+
+	useFakeCore(t)
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"run", "--config", writeConfig(t),
+		"--controller", "127.0.0.1:9090",
+		"--", "sh", "-c", "exit 0",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	secret, _ := lastFakeCore.config["secret"].(string)
+	if secret == "" {
+		t.Fatal("run did not generate a controller secret")
+	}
 	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
-		t.Errorf("run did not log the generated secret: %q", stderr.String())
+		t.Errorf("run did not print the secret on a TTY stderr: %q", stderr.String())
 	}
 }
 
@@ -707,7 +793,7 @@ func TestRunTunFlagOverlay(t *testing.T) {
 	root := NewRoot("dev")
 	root.SetArgs([]string{
 		"run", "--config", writeConfig(t),
-		"--tun", "--tun-stack", "gvisor",
+		"--tun", "--tun-stack", "gvisor", "--tun-device", "cx0",
 		"--tun-exclude", "10.0.0.0/8", "--tun-exclude", "2001:db8::/32",
 		"--", "sh", "-c", "exit 0",
 	})
@@ -718,8 +804,8 @@ func TestRunTunFlagOverlay(t *testing.T) {
 	if !ok {
 		t.Fatalf("tun config = %#v", lastFakeCore.config["tun"])
 	}
-	if tun["enable"] != true || tun["stack"] != "gvisor" {
-		t.Errorf("tun enable/stack = %#v", tun)
+	if tun["enable"] != true || tun["stack"] != "gvisor" || tun["device"] != "cx0" {
+		t.Errorf("tun enable/stack/device = %#v", tun)
 	}
 	if tun["auto-route"] != true || tun["auto-detect-interface"] != true {
 		t.Errorf("tun auto-route/auto-detect-interface = %#v", tun)
@@ -832,6 +918,19 @@ func TestTunFlagsValidateCIDR(t *testing.T) {
 	}
 }
 
+func TestTunDeviceRequiresName(t *testing.T) {
+	root := NewRoot("dev")
+	root.SetArgs([]string{
+		"run", "--config", writeConfig(t),
+		"--tun", "--tun-device", " ",
+		"--", "sh", "-c", "exit 0",
+	})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--tun-device") {
+		t.Fatalf("Execute error = %v, want --tun-device validation error", err)
+	}
+}
+
 func TestRunRejectsOccupiedMixedPort(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell test uses sh")
@@ -907,8 +1006,19 @@ func TestServeGeneratesTLSControllerSecret(t *testing.T) {
 	if !ok || secret == "" {
 		t.Fatalf("serve did not persist a TLS controller secret: %#v", cfg["secret"])
 	}
-	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
-		t.Errorf("serve did not log the TLS controller secret: %q", stderr.String())
+	path := controllerSecretPath(state)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read controller secret file: %v", err)
+	}
+	if strings.TrimSpace(string(data)) != secret {
+		t.Errorf("controller secret file = %q, want persisted secret", data)
+	}
+	if strings.Contains(stderr.String(), secret) {
+		t.Errorf("serve leaked the TLS controller secret to stderr: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), path) {
+		t.Errorf("serve did not log the TLS controller secret path: %q", stderr.String())
 	}
 }
 

@@ -156,6 +156,9 @@ func IsTunName(name string) bool {
 			return true
 		}
 	}
+	if strings.HasSuffix(name, "tun") || strings.HasSuffix(name, "tap") {
+		return true
+	}
 	for _, word := range []string{"wintun", "wireguard"} {
 		if strings.Contains(name, word) {
 			return true

@@ -15,6 +15,7 @@ import (
 	"github.com/DawnMagnet/clashix-go/internal/core"
 	"github.com/DawnMagnet/clashix-go/internal/ui"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -87,12 +88,9 @@ func newServeCmd() *cobra.Command {
 			}
 			autoInterface := applyAutoInterface(cmd, "serve", &opts, cfg)
 			warnInsecureController(cmd, "serve", cfg)
-			secret, generated, err := ensureControllerSecret(cfg, "")
+			secret, err := ensureServeControllerSecret(cmd, stateDir, cfg, "")
 			if err != nil {
 				return err
-			}
-			if generated {
-				logControllerSecret(cmd, "serve", secret)
 			}
 			panelURL, err := setupPanel(stateDir, cfg, true, true, "serve", cmd)
 			if err != nil {
@@ -137,13 +135,10 @@ func newServeCmd() *cobra.Command {
 				}
 				newAutoInterface := applyAutoInterface(cmd, "serve", &opts, newCfg)
 				warnInsecureController(cmd, "serve", newCfg)
-				newSecret, generated, err := ensureControllerSecret(newCfg, secret)
+				newSecret, err := ensureServeControllerSecret(cmd, stateDir, newCfg, secret)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) secret failed: %v\n", reason, err)
 					return
-				}
-				if generated {
-					logControllerSecret(cmd, "serve", newSecret)
 				}
 				newPanelURL, err := setupPanel(stateDir, newCfg, true, false, "serve", cmd)
 				if err != nil {
@@ -318,13 +313,6 @@ func newRunCmd() *cobra.Command {
 				delete(cfg, key)
 			}
 			warnInsecureController(cmd, "run", cfg)
-			secret, generated, err := ensureControllerSecret(cfg, "")
-			if err != nil {
-				return err
-			}
-			if generated {
-				logControllerSecret(cmd, "run", secret)
-			}
 
 			stateDir, err := os.MkdirTemp("", "cx-run-*")
 			if err != nil {
@@ -333,6 +321,9 @@ func newRunCmd() *cobra.Command {
 			defer func() {
 				_ = os.RemoveAll(stateDir)
 			}()
+			if _, err := ensureRunControllerSecret(cmd, stateDir, cfg); err != nil {
+				return err
+			}
 			panelURL, err := setupPanel(stateDir, cfg, uiSet, true, "run", cmd)
 			if err != nil {
 				return err
@@ -390,6 +381,125 @@ func marshalStateConfig(cfg map[string]any, omitAutoInterface bool) ([]byte, err
 	persisted := config.Clone(cfg)
 	delete(persisted, "interface-name")
 	return config.Marshal(persisted)
+}
+
+const controllerSecretName = "controller-secret"
+
+var stderrIsTerminal = func() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
+}
+
+func controllerSecretPath(stateDir string) string {
+	return filepath.Join(stateDir, controllerSecretName)
+}
+
+func configuredSecret(cfg map[string]any) string {
+	secret, _ := cfg["secret"].(string)
+	return secret
+}
+
+func controllerEnabled(cfg map[string]any) bool {
+	main, tls := controllerEndpoints(cfg)
+	return main != "" || tls != ""
+}
+
+func readControllerSecret(stateDir string) (string, bool, error) {
+	path := controllerSecretPath(stateDir)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read controller secret %q: %w", path, err)
+	}
+	secret := strings.TrimSpace(string(data))
+	if secret == "" {
+		return "", false, nil
+	}
+	return secret, true, nil
+}
+
+func writeControllerSecret(stateDir, secret string) (string, error) {
+	path := controllerSecretPath(stateDir)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create controller secret directory %q: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", fmt.Errorf("create controller secret in %q: %w", dir, err)
+	}
+	tmpPath := tmp.Name()
+	committed := false
+	defer func() {
+		_ = tmp.Close()
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := tmp.Chmod(0o600); err != nil {
+		return "", fmt.Errorf("set controller secret mode on %q: %w", tmpPath, err)
+	}
+	if _, err := tmp.WriteString(secret); err != nil {
+		return "", fmt.Errorf("write controller secret %q: %w", tmpPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return "", fmt.Errorf("sync controller secret %q: %w", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close controller secret %q: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return "", fmt.Errorf("replace controller secret %q: %w", path, err)
+	}
+	committed = true
+	return path, nil
+}
+
+func ensureServeControllerSecret(cmd *cobra.Command, stateDir string, cfg map[string]any, fallback string) (string, error) {
+	if configuredSecret(cfg) == "" && controllerEnabled(cfg) {
+		secret, ok, err := readControllerSecret(stateDir)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			cfg["secret"] = secret
+			return secret, nil
+		}
+	}
+	secret, generated, err := ensureControllerSecret(cfg, fallback)
+	if err != nil {
+		return "", err
+	}
+	if !generated {
+		return secret, nil
+	}
+	path, err := writeControllerSecret(stateDir, secret)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: generated controller secret in %s\n", path)
+	return secret, nil
+}
+
+func ensureRunControllerSecret(cmd *cobra.Command, stateDir string, cfg map[string]any) (string, error) {
+	secret, generated, err := ensureControllerSecret(cfg, "")
+	if err != nil {
+		return "", err
+	}
+	if !generated {
+		return secret, nil
+	}
+	if stderrIsTerminal() {
+		logControllerSecret(cmd, "run", secret)
+		return secret, nil
+	}
+	path, err := writeControllerSecret(stateDir, secret)
+	if err != nil {
+		return "", err
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "cx run: generated controller secret in %s\n", path)
+	return secret, nil
 }
 
 func ensureControllerSecret(cfg map[string]any, fallback string) (string, bool, error) {

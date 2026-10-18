@@ -23,16 +23,23 @@ All notable changes to this project are documented in this file.
 - `cx version` falls back to Go build information when the release version is
   not injected: the module version when available, otherwise the 12-character
   VCS revision with `-dirty` when the worktree was modified.
-- `serve` and `run` accept `--tun`, `--tun-stack system|gvisor|mixed`, and
-  repeatable `--tun-exclude CIDR`. They override `tun.enable`, `tun.stack`,
-  `tun.auto-route`, `tun.auto-detect-interface`, and
-  `tun.route-exclude-address`; CIDRs are validated before startup.
+- `serve` and `run` accept `--tun`, `--tun-stack system|gvisor|mixed`,
+  `--tun-device NAME`, and repeatable `--tun-exclude CIDR`. They override
+  `tun.enable`, `tun.stack`, `tun.device`, `tun.auto-route`,
+  `tun.auto-detect-interface`, and `tun.route-exclude-address`; CIDRs are
+  validated before startup.
 - `serve` and `run` accept `--interface NAME`, `--routing-mark N`, and
   `--no-auto-interface`. For non-TUN instances on Linux, macOS, and Windows,
   `cx` detects when the effective default route uses a host TUN and binds
   outbound sockets (including DNS) to the physical default interface unless
-  `interface-name`/`routing-mark` is already set. `--interface=` or
-  `--no-auto-interface` disables auto-detection.
+  `interface-name`/`routing-mark` is already set. On Linux the effective egress
+  is resolved with netlink `RTM_GETROUTE` lookups for public IPv4/IPv6 targets,
+  so policy routing tables such as sing-tun's table 2022 are honored; the
+  physical interface is taken from the main table (254) default route.
+  `--interface=` or `--no-auto-interface` disables auto-detection.
+- URL-test and fallback groups receive an initial health check after startup and
+  reload, so the first request does not pick an untested first member while the
+  other nodes are still unmeasured.
 - Added the `packaging/systemd/cx-tun.conf` drop-in with `CAP_NET_ADMIN`,
   `CAP_NET_BIND_SERVICE`, `/dev/net/tun` access, and `PrivateDevices=no`.
 - All CI, release, and documented builds now include the `with_gvisor` mihomo
@@ -47,16 +54,26 @@ All notable changes to this project are documented in this file.
   `PrivateTmp`). The launchd plist documents the reload command and the
   `KeepAlive`/`ThrottleInterval` equivalents.
 
+### Security
+
+- `cx serve` no longer prints auto-generated controller secrets to stderr.
+  The secret is persisted atomically in `<state-dir>/controller-secret` with
+  mode `0600`, reused on later restarts while non-empty, and only the file path
+  is logged. `cx run` prints a generated secret only when stderr is a terminal;
+  otherwise it writes `<temp-dir>/controller-secret` and logs that path.
+
 ### Changed
 
 - Bare `PATTERN` selection applies to every select group that directly contains
   a matching member and sets groups containing the final `MATCH` selector to it;
   other groups are left unchanged. Precise `GROUP=PATTERN` specs run afterwards
   and win. Bare selection only errors when no group contains a match, and then
-  lists actual proxy nodes ranked by shared words/aliases, protocol (`type:`)
-  match, then group order; group names appear only in `GROUP=PATTERN` errors.
-  When the pattern matches top-level proxies that belong to no select group, the
-  error lists them explicitly.
+  lists actual proxy nodes ranked by real similarity: protocol/type match (a
+  bare word equal to a proxy type counts), region alias match, shared tokens,
+  normalized longest common substring and shared characters, and only then
+  group order. Group names appear only in `GROUP=PATTERN` errors. When the
+  pattern matches top-level proxies that belong to no select group, the error
+  lists them explicitly.
 - Short region codes match whole tokens, so `us` does not match `plus`, and the
   fuzzy subsequence fallback was removed (it matched `trojan` to `🇹🇷TR 01`).
 - Ports `0` now disable listeners for `--port`, `--socks-port`, `--mixed-port`,
@@ -100,8 +117,12 @@ All notable changes to this project are documented in this file.
   `CAP_NET_BIND_SERVICE` for DNS port 53), installing the `cx-tun.conf` systemd
   drop-in and running `daemon-reload`, public-server route exclusions,
   provider-internal DNS/metadata addresses, fake-IP filtering for local/cloud
-  domains, the `with_gvisor` build tag, and the `--interface`/
-  `--routing-mark`/`--no-auto-interface` host-TUN workaround.
+  domains, the `with_gvisor` build tag, `--tun-device`, and the `--interface`/
+  `--routing-mark`/`--no-auto-interface` host-TUN workaround including Linux
+  netlink detection and table 254 physical-interface lookup.
+- README (English and Chinese) documents the controller-secret file for
+  `serve`/`run`, TUN device busy guidance, Linux policy-route detection, and the
+  similarity-based closest-candidate ranking.
 - Added an operations note that `systemd-run --on-active=...` timers restart
   their countdown after `systemctl daemon-reload`.
 
@@ -114,7 +135,12 @@ All notable changes to this project are documented in this file.
   state, captures mihomo's underlying error from its log stream, and reports
   `mihomo TUN inbound did not start` with the actual cause plus remediation
   hints (`CAP_NET_ADMIN`/root, `/dev/net/tun`, device cgroups/`PrivateDevices`,
-  or a gVisor/mixed stack that was not compiled in).
+  or a gVisor/mixed stack that was not compiled in). An `EBUSY`/`device or
+  resource busy` failure now says the TUN device is already in use by another
+  process or cx instance and suggests `--tun-device NAME`.
+- Linux host-TUN detection no longer parses only `/proc/net/route` (main table),
+  which missed policy-routed TUN egress and left non-TUN `run` loops pointing at
+  the wrong interface. It now queries the kernel's actual route with netlink.
 - A non-TUN `cx run` no longer loops its outbound proxy connections back into a
   host TUN; it binds to the physical default interface unless overridden.
 - Node-selection errors no longer say "primary group X"; they describe the

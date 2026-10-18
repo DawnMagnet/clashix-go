@@ -3,16 +3,33 @@
 package hostnet
 
 import (
+	"encoding/binary"
+	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 
-	"github.com/jsimonetti/rtnetlink"
+	"golang.org/x/sys/unix"
 )
+
+type publicRouteTarget struct {
+	family  uint8
+	address netip.Addr
+}
+
+var publicRouteTargets = []publicRouteTarget{
+	{family: unix.AF_INET, address: netip.MustParseAddr("1.1.1.1")},
+	{family: unix.AF_INET6, address: netip.MustParseAddr("2606:4700:4700::1111")},
+}
+
+type routeNetlink struct {
+	fd  int
+	seq uint32
+}
 
 func readSystemRoutes() ([]Route, []Rule, bool) {
 	if routes, rules, ok := readNetlinkRoutes(); ok && len(routes) > 0 {
-		markLinuxTunDevices(routes)
 		return routes, rules, true
 	}
 	routes, ok := readProcRoutes()
@@ -24,103 +41,172 @@ func readSystemRoutes() ([]Route, []Rule, bool) {
 }
 
 func readNetlinkRoutes() ([]Route, []Rule, bool) {
-	conn, err := rtnetlink.Dial(nil)
+	conn, err := openRouteNetlink()
 	if err != nil {
 		return nil, nil, false
 	}
 	defer conn.Close()
 
-	messages, err := conn.Route.List()
-	if err != nil {
-		return nil, nil, false
+	var routes []Route
+	var rules []Rule
+	for _, target := range publicRouteTargets {
+		lookedUp, err := conn.request(target.family, target.address, 0, false)
+		if err != nil || len(lookedUp) == 0 {
+			continue
+		}
+		route, ok := routeFromNetlink(lookedUp[0])
+		if !ok {
+			continue
+		}
+		routes = append(routes, route)
+		// The lookup result is the kernel's effective route, including any
+		// policy table selected by ip rules. Make sure Decide uses it before
+		// consulting the main table.
+		rules = append(rules, Rule{Family: route.Family, Priority: 0, Table: route.Table, MatchAll: true})
 	}
-	routes := make([]Route, 0, len(messages))
-	for _, message := range messages {
-		family := addressFamily(message.Family)
-		if family == 0 {
-			continue
-		}
-		// Only unicast default routes matter. RTN_UNICAST is 1 on Linux.
-		if message.DstLength != 0 || message.Type != 1 {
-			continue
-		}
-		table := int(message.Table)
-		if message.Attributes.Table != 0 {
-			table = int(message.Attributes.Table)
-		}
-		if table == 0 {
-			table = MainTable
-		}
-		if message.Attributes.OutIface == 0 {
-			continue
-		}
-		iface, err := net.InterfaceByIndex(int(message.Attributes.OutIface))
+
+	for _, family := range []uint8{unix.AF_INET, unix.AF_INET6} {
+		dumped, err := conn.request(family, netip.Addr{}, MainTable, true)
 		if err != nil {
 			continue
 		}
-		routes = append(routes, Route{
-			Family: family,
-			Table:  table,
-			Device: iface.Name,
-			Metric: int(message.Attributes.Priority),
-		})
+		for _, candidate := range dumped {
+			if candidate.DstLength != 0 || candidate.Table != MainTable || candidate.IfIndex == 0 {
+				continue
+			}
+			if route, ok := routeFromNetlink(candidate); ok {
+				routes = append(routes, route)
+			}
+		}
 	}
 
-	ruleMessages, err := conn.Rule.List()
-	if err != nil {
-		return routes, nil, true
+	if len(routes) == 0 {
+		return nil, nil, false
 	}
-	rules := make([]Rule, 0, len(ruleMessages))
-	for _, message := range ruleMessages {
-		rule := Rule{
-			Family:   addressFamily(message.Family),
-			Priority: 32767,
-			Table:    int(message.Table),
-		}
-		if attributes := message.Attributes; attributes != nil {
-			if attributes.Priority != nil {
-				rule.Priority = int(*attributes.Priority)
-			}
-			if attributes.Table != nil {
-				rule.Table = int(*attributes.Table)
-			}
-			rule.MatchAll = ruleMatchesAll(attributes)
-		} else {
-			rule.MatchAll = true
-		}
-		rules = append(rules, rule)
-	}
+	markLinuxTunDevices(routes)
 	return routes, rules, true
 }
 
-func addressFamily(value uint8) int {
-	switch value {
-	case 2: // AF_INET
-		return 4
-	case 10: // AF_INET6
-		return 6
-	default:
-		return 0
+func routeFromNetlink(message netlinkRoute) (Route, bool) {
+	iface, err := net.InterfaceByIndex(int(message.IfIndex))
+	if err != nil || iface.Name == "" {
+		return Route{}, false
+	}
+	return Route{
+		Family: message.Family,
+		Table:  message.Table,
+		Device: iface.Name,
+		Metric: int(message.Metric),
+	}, true
+}
+
+func openRouteNetlink() (*routeNetlink, error) {
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		return nil, err
+	}
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	timeout := unix.Timeval{Sec: 2}
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &timeout); err != nil {
+		_ = unix.Close(fd)
+		return nil, err
+	}
+	return &routeNetlink{fd: fd}, nil
+}
+
+func (conn *routeNetlink) Close() error {
+	return unix.Close(conn.fd)
+}
+
+func (conn *routeNetlink) request(family uint8, destination netip.Addr, table int, dump bool) ([]netlinkRoute, error) {
+	conn.seq++
+	request := marshalNetlinkRouteRequest(conn.seq, family, destination, table, dump)
+	if err := unix.Sendto(conn.fd, request, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return nil, err
+	}
+
+	var routes []netlinkRoute
+	buffer := make([]byte, 64*1024)
+	for {
+		n, _, err := unix.Recvfrom(conn.fd, buffer, 0)
+		if err != nil {
+			return routes, fmt.Errorf("receive netlink route response: %w", err)
+		}
+		data := buffer[:n]
+		for len(data) >= netlinkHeaderLength {
+			length := int(binary.NativeEndian.Uint32(data[0:4]))
+			if length < netlinkHeaderLength || length > len(data) {
+				return routes, fmt.Errorf("invalid netlink response length %d", length)
+			}
+			messageType := binary.NativeEndian.Uint16(data[4:6])
+			sequence := binary.NativeEndian.Uint32(data[8:12])
+			if sequence != conn.seq {
+				data = data[minInt(alignNetlink(length), len(data)):]
+				continue
+			}
+			switch messageType {
+			case netlinkMessageError:
+				if length < netlinkHeaderLength+4 {
+					return routes, fmt.Errorf("short netlink error response")
+				}
+				errno := int32(binary.NativeEndian.Uint32(data[netlinkHeaderLength : netlinkHeaderLength+4]))
+				if errno != 0 {
+					return routes, unix.Errno(-errno)
+				}
+			case netlinkMessageDone:
+				return routes, nil
+			default:
+				parsed, err := parseNetlinkRouteMessages(data[:length])
+				if err != nil {
+					return routes, err
+				}
+				routes = append(routes, parsed...)
+			}
+			data = data[minInt(alignNetlink(length), len(data)):]
+		}
+		if !dump {
+			return routes, nil
+		}
 	}
 }
 
-func ruleMatchesAll(attributes *rtnetlink.RuleAttributes) bool {
-	if attributes == nil {
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func markLinuxTunDevices(routes []Route) {
+	for i := range routes {
+		if routes[i].Tun {
+			continue
+		}
+		if isLinuxTunDevice(routes[i].Device) {
+			routes[i].Tun = true
+		}
+	}
+}
+
+func isLinuxTunDevice(device string) bool {
+	if device == "" {
+		return false
+	}
+	if _, err := os.Stat("/sys/class/net/" + device + "/tun_flags"); err == nil {
 		return true
 	}
-	if attributes.Src != nil || attributes.Dst != nil ||
-		attributes.FwMark != nil || attributes.FwMask != nil ||
-		attributes.UIDRange != nil || attributes.SPortRange != nil ||
-		attributes.DPortRange != nil || attributes.OIFName != nil {
+	if IsTunName(device) {
+		return true
+	}
+	// ARPHRD_NONE (65534) is used by tun/tap and WireGuard links.
+	data, err := os.ReadFile("/sys/class/net/" + device + "/type")
+	if err != nil {
 		return false
 	}
-	// sing-tun routes all non-loopback traffic through its table. Treat the
-	// loopback interface restriction (usually an inverted `iif lo`) as an
-	// all-traffic rule; more specific interface rules are ignored.
-	if attributes.IIFName != nil && *attributes.IIFName != "lo" {
-		return false
-	}
-	return true
+	return strings.TrimSpace(string(data)) == "65534"
 }
 
 func readProcRoutes() ([]Route, bool) {
@@ -135,24 +221,4 @@ func readProcRoutes() ([]Route, bool) {
 		ok = true
 	}
 	return routes, ok
-}
-
-func markLinuxTunDevices(routes []Route) {
-	for i := range routes {
-		if routes[i].Tun {
-			continue
-		}
-		if IsTunName(routes[i].Device) {
-			routes[i].Tun = true
-			continue
-		}
-		// ARPHRD_NONE (65534) is used by tun/tap and WireGuard links.
-		data, err := os.ReadFile("/sys/class/net/" + routes[i].Device + "/type")
-		if err != nil {
-			continue
-		}
-		if strings.TrimSpace(string(data)) == "65534" {
-			routes[i].Tun = true
-		}
-	}
 }

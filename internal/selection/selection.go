@@ -735,31 +735,39 @@ func formatClosest(m *matcher, candidates []nodeCandidate, limit int) string {
 	return strings.Join(names, ", ")
 }
 
-// closest ranks candidates by shared words and aliases first, then protocol
-// (type:) matches, then the original group/member order.
+// closest ranks candidates by protocol/type similarity, region alias matches,
+// shared tokens, normalized longest common substring, normalized shared
+// characters, and finally the original group/member order.
 func closest(m *matcher, candidates []nodeCandidate, limit int) []string {
 	type scored struct {
-		name     string
-		words    int
-		protocol int
-		order    int
+		name  string
+		score relevanceScore
+		order int
 	}
 	scoredCandidates := make([]scored, 0, len(candidates))
 	for index, candidate := range candidates {
-		words, protocol := m.relevance(candidate.name, candidate.kind)
 		scoredCandidates = append(scoredCandidates, scored{
-			name:     candidate.name,
-			words:    words,
-			protocol: protocol,
-			order:    index,
+			name:  candidate.name,
+			score: m.relevance(candidate.name, candidate.kind),
+			order: index,
 		})
 	}
 	sort.SliceStable(scoredCandidates, func(i, j int) bool {
-		if scoredCandidates[i].words != scoredCandidates[j].words {
-			return scoredCandidates[i].words > scoredCandidates[j].words
+		left, right := scoredCandidates[i].score, scoredCandidates[j].score
+		if left.protocol != right.protocol {
+			return left.protocol > right.protocol
 		}
-		if scoredCandidates[i].protocol != scoredCandidates[j].protocol {
-			return scoredCandidates[i].protocol > scoredCandidates[j].protocol
+		if left.region != right.region {
+			return left.region > right.region
+		}
+		if left.tokens != right.tokens {
+			return left.tokens > right.tokens
+		}
+		if left.lcs != right.lcs {
+			return left.lcs > right.lcs
+		}
+		if left.chars != right.chars {
+			return left.chars > right.chars
 		}
 		return scoredCandidates[i].order < scoredCandidates[j].order
 	})
@@ -773,24 +781,172 @@ func closest(m *matcher, candidates []nodeCandidate, limit int) []string {
 	return out
 }
 
-func (m *matcher) relevance(name, kind string) (words, protocol int) {
+type relevanceScore struct {
+	protocol int
+	region   int
+	tokens   int
+	lcs      float64
+	chars    float64
+}
+
+func (m *matcher) relevance(name, kind string) relevanceScore {
 	if m.re != nil {
 		if m.re.MatchString(name) {
-			return 1, 0
+			return relevanceScore{tokens: 1}
 		}
-		return 0, 0
+		return relevanceScore{}
 	}
 	lower := strings.ToLower(name)
+	score := relevanceScore{
+		protocol: m.protocolMatches(kind),
+		region:   m.regionMatches(lower),
+		tokens:   m.sharedTokens(lower),
+	}
+	pattern := m.textPattern()
+	if pattern != "" && lower != "" {
+		patternRunes := []rune(pattern)
+		nameRunes := []rune(lower)
+		score.lcs = float64(longestCommonSubstring(patternRunes, nameRunes)) / float64(maxInt(len(patternRunes), len(nameRunes)))
+		score.chars = sharedCharacterRatio(patternRunes, nameRunes)
+	}
+	return score
+}
+
+func (m *matcher) protocolMatches(kind string) int {
+	if m.re != nil {
+		return 0
+	}
+	count := 0
+	for _, term := range m.terms {
+		protocol := term
+		if strings.HasPrefix(term, "type:") {
+			protocol = strings.TrimSpace(term[len("type:"):])
+		}
+		if typeMatches(kind, protocol) {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *matcher) regionMatches(candidate string) int {
+	if m.re != nil {
+		return 0
+	}
+	count := 0
+	for _, term := range m.terms {
+		region := regionFor(term)
+		if region == nil {
+			continue
+		}
+		matched := false
+		for _, alias := range region.names {
+			if termMatches(alias, candidate) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			matched = strings.Contains(candidate, region.flag)
+		}
+		if matched {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *matcher) sharedTokens(candidate string) int {
+	if m.re != nil {
+		return 0
+	}
+	tokens := make(map[string]struct{})
+	for _, token := range strings.FieldsFunc(candidate, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		tokens[token] = struct{}{}
+	}
+	count := 0
 	for _, term := range m.terms {
 		if strings.HasPrefix(term, "type:") {
-			if typeMatches(kind, term[len("type:"):]) {
-				protocol++
+			continue
+		}
+		if _, ok := tokens[term]; ok {
+			count++
+			continue
+		}
+		if region := regionFor(term); region != nil {
+			if _, ok := tokens[region.flag]; ok {
+				count++
+				continue
+			}
+			for _, alias := range region.names {
+				if _, ok := tokens[alias]; ok {
+					count++
+					break
+				}
 			}
 			continue
 		}
-		if wordMatches(term, lower) {
-			words++
+		if len(term) > 2 && termMatches(term, candidate) {
+			count++
 		}
 	}
-	return words, protocol
+	return count
+}
+
+func (m *matcher) textPattern() string {
+	if m.re != nil {
+		return m.raw
+	}
+	terms := make([]string, 0, len(m.terms))
+	for _, term := range m.terms {
+		if !strings.HasPrefix(term, "type:") {
+			terms = append(terms, term)
+		}
+	}
+	return strings.Join(terms, " ")
+}
+
+func longestCommonSubstring(left, right []rune) int {
+	best := 0
+	previous := make([]int, len(right)+1)
+	for i := range left {
+		current := make([]int, len(right)+1)
+		for j := range right {
+			if left[i] == right[j] {
+				current[j+1] = previous[j] + 1
+				if current[j+1] > best {
+					best = current[j+1]
+				}
+			}
+		}
+		previous = current
+	}
+	return best
+}
+
+func sharedCharacterRatio(left, right []rune) float64 {
+	if len(left) == 0 || len(right) == 0 {
+		return 0
+	}
+	counts := make(map[rune]int, len(left))
+	for _, char := range left {
+		counts[char]++
+	}
+	common := 0
+	for _, char := range right {
+		if counts[char] > 0 {
+			counts[char]--
+			common++
+		}
+	}
+	return float64(common) / float64(maxInt(len(left), len(right)))
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+	return right
 }

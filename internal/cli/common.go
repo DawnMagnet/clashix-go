@@ -51,6 +51,7 @@ type configOptions struct {
 	allowLAN           bool
 	tun                bool
 	tunStack           string
+	tunDevice          string
 	tunExclude         []string
 	interfaceName      string
 	routingMark        int
@@ -88,6 +89,7 @@ func addTunFlags(cmd *cobra.Command, opts *configOptions) {
 	flags := cmd.Flags()
 	flags.BoolVar(&opts.tun, "tun", false, "enable TUN (--tun=false disables it)")
 	flags.StringVar(&opts.tunStack, "tun-stack", "", "TUN stack: system, gvisor, or mixed (requires --tun)")
+	flags.StringVar(&opts.tunDevice, "tun-device", "", "TUN device name (requires --tun)")
 	flags.StringArrayVar(&opts.tunExclude, "tun-exclude", nil, "exclude CIDR from TUN routes (repeatable; requires --tun)")
 }
 
@@ -145,6 +147,9 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	if changed("tun-stack") {
 		overlay.TunStack = config.StringPtr(opts.tunStack)
 	}
+	if changed("tun-device") {
+		overlay.TunDevice = config.StringPtr(opts.tunDevice)
+	}
 	if changed("tun-exclude") {
 		overlay.TunExcludeRoutes = append([]string(nil), opts.tunExclude...)
 	}
@@ -166,6 +171,12 @@ func (opts *configOptions) validateTun(cmd *cobra.Command) error {
 			opts.tunStack = stack
 		default:
 			return fmt.Errorf("--tun-stack must be system, gvisor, or mixed")
+		}
+	}
+	if changed("tun-device") {
+		opts.tunDevice = strings.TrimSpace(opts.tunDevice)
+		if opts.tunDevice == "" {
+			return fmt.Errorf("--tun-device requires a device name")
 		}
 	}
 	if changed("tun-exclude") {

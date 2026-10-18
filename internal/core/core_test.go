@@ -101,7 +101,7 @@ func TestTunExampleMergesAndValidates(t *testing.T) {
 }
 
 func TestTunFailureIncludesUnderlyingError(t *testing.T) {
-	err := tunFailure("system", "configure tun interface: operation not permitted")
+	err := tunFailure("system", "", "configure tun interface: operation not permitted")
 	if !errors.Is(err, ErrTunNotStarted) {
 		t.Fatalf("tunFailure error = %v, want ErrTunNotStarted", err)
 	}
@@ -113,6 +113,18 @@ func TestTunFailureIncludesUnderlyingError(t *testing.T) {
 		"PrivateDevices",
 		"with_gvisor",
 	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestTunFailureBusySuggestsTunDevice(t *testing.T) {
+	err := tunFailure("system", "cxtun", "configure tun interface: device or resource busy")
+	if !errors.Is(err, ErrTunNotStarted) {
+		t.Fatalf("tunFailure error = %v, want ErrTunNotStarted", err)
+	}
+	for _, want := range []string{"cxtun", "already in use", "another process", "another cx instance", "--tun-device NAME"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}

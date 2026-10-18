@@ -191,6 +191,7 @@ func (m *Mihomo) startLocked(ctx context.Context, dir string, cfg []byte) error 
 		_ = shutdownCore()
 		return fmt.Errorf("apply node selection: %w", err)
 	}
+	primeProxyGroups(ctx)
 	return nil
 }
 
@@ -229,6 +230,7 @@ func (m *Mihomo) Apply(dir string, cfg []byte) error {
 	if err := selection.Apply(parsed, specs); err != nil {
 		return fmt.Errorf("apply node selection: %w", err)
 	}
+	primeProxyGroups(context.Background())
 	return nil
 }
 
@@ -262,21 +264,44 @@ func tunStack(cfg map[string]any) string {
 	return stack
 }
 
+func tunDevice(cfg map[string]any) string {
+	tun, ok := cfg["tun"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	device, _ := tun["device"].(string)
+	return strings.TrimSpace(device)
+}
+
 func checkTun(cfg map[string]any, detail string) error {
 	if !tunConfigured(cfg) || listener.GetTunConf().Enable {
 		return nil
 	}
-	return tunFailure(tunStack(cfg), detail)
+	return tunFailure(tunStack(cfg), tunDevice(cfg), detail)
 }
 
-func tunFailure(stack, detail string) error {
+func tunFailure(stack, device, detail string) error {
 	if stack == "" {
 		stack = "unknown"
 	}
 	if detail == "" {
 		detail = "mihomo did not report a TUN error"
 	}
+	if isTunBusyError(detail) {
+		label := "the configured TUN device"
+		if device != "" {
+			label = fmt.Sprintf("TUN device %q", device)
+		}
+		return fmt.Errorf("%w (stack %s): %s is already in use by another process (possibly another cx instance); stop it or pass --tun-device NAME to use a different device: %s", ErrTunNotStarted, stack, label, detail)
+	}
 	return fmt.Errorf("%w (stack %s): %s; possible causes: missing CAP_NET_ADMIN or root privileges; /dev/net/tun missing or blocked by a device cgroup/PrivateDevices; gvisor or mixed stack not compiled in (build with the with_gvisor tag)", ErrTunNotStarted, stack, detail)
+}
+
+func isTunBusyError(detail string) bool {
+	lower := strings.ToLower(detail)
+	return strings.Contains(lower, "device or resource busy") ||
+		strings.Contains(lower, "resource busy") ||
+		strings.Contains(lower, "ebusy")
 }
 
 // parseMihomoConfig applies prepared config and captures the underlying TUN
