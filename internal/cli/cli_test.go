@@ -1230,6 +1230,19 @@ func TestTunIndexFlagsAndAutoDerive(t *testing.T) {
 	}
 }
 
+func TestDeriveTunFakeIPRangeUsesGatewayAddress(t *testing.T) {
+	fake := config.DeriveTunFakeIPRange("cxtun2")
+	if fake.Bits() != 24 || !fake.Addr().Is4() {
+		t.Fatalf("fake-ip-range = %v, want an IPv4 /24", fake)
+	}
+	if fake.Addr() != fake.Masked().Addr().Next() {
+		t.Errorf("fake-ip-range = %v, want .1 so mihomo derives a .1/30 TUN address", fake)
+	}
+	if fake.Overlaps(config.DefaultFakeIPRange) {
+		t.Errorf("fake-ip-range = %v overlaps the default 198.18.0.0/16 pool", fake)
+	}
+}
+
 func TestTunAutoDefaultsRespectDeviceAndFakeIPPool(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -1313,9 +1326,15 @@ func TestTunAutoDefaultsRespectDeviceAndFakeIPPool(t *testing.T) {
 			if fake.Overlaps(config.DefaultFakeIPRange) {
 				t.Errorf("derived fake-ip pool %v overlaps the default 198.18.0.0/16 pool", fake)
 			}
+			if fake.Addr() != fake.Masked().Addr().Next() {
+				t.Errorf("fake-ip-range = %v, want the .1 gateway address rather than the .0 network address", fake)
+			}
 			wantTun := netip.PrefixFrom(fake.Addr(), 30)
 			if inet4[0].Masked() != wantTun.Masked() {
 				t.Errorf("TUN Inet4Address = %v, want the pool's first /30 %v", inet4[0], wantTun)
+			}
+			if inet4[0].Addr() == inet4[0].Masked().Addr() {
+				t.Errorf("TUN Inet4Address = %v, want .1 rather than the /30 network address", inet4[0])
 			}
 			if wantTun.Masked().Addr().Next() != fake.Addr() {
 				t.Errorf("fake-IP gateway semantics changed: pool %v, TUN %v", fake, wantTun)

@@ -40,7 +40,13 @@ func tunAddressHash(value string) uint32 {
 }
 
 // DeriveTunFakeIPRange picks a deterministic 198.19.N.1/24 slice outside
-// mihomo's default 198.18.0.0/16 fake-IP pool for a non-default device.
+// mihomo's default 198.18.0.0/16 fake-IP pool for a non-default device. Keep
+// the .1 host address: mihomo's parseTun uses dns.FakeIPRange.Addr() (not
+// Masked()) to build the TUN /30, so a .0/24 range would assign the network
+// address 198.19.N.0/30 instead of the gateway-style .1/30. The fakeip pool
+// still masks the range to .0, reserves .1 as its gateway, and starts handing
+// out addresses at .4, matching mihomo's default 198.18.0.1/16 -> .1/30
+// relationship.
 func DeriveTunFakeIPRange(device string) netip.Prefix {
 	if !IsNonDefaultTunDevice(device) {
 		return DefaultFakeIPRange
