@@ -8,6 +8,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
+	mihomolog "github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 )
 
@@ -45,6 +46,9 @@ func primeProxyGroups(ctx context.Context) {
 		return
 	}
 
+	started := time.Now()
+	mihomolog.Infoln("Initial proxy health check started for %d provider(s)", len(providers))
+
 	var wait sync.WaitGroup
 	for _, provider := range providers {
 		wait.Add(1)
@@ -63,9 +67,13 @@ func primeProxyGroups(ctx context.Context) {
 	}
 	timer := time.NewTimer(initialHealthCheckTimeout)
 	defer timer.Stop()
+	result := "completed"
 	select {
 	case <-done:
 	case <-timer.C:
+		result = "timed out"
 	case <-ctx.Done():
+		result = "canceled"
 	}
+	mihomolog.Infoln("Initial proxy health check %s after %s", result, time.Since(started).Round(time.Millisecond))
 }

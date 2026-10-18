@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -52,6 +53,8 @@ type configOptions struct {
 	tun                bool
 	tunStack           string
 	tunDevice          string
+	tunRouteTable      int
+	tunRuleIndex       int
 	tunExclude         []string
 	interfaceName      string
 	routingMark        int
@@ -90,6 +93,8 @@ func addTunFlags(cmd *cobra.Command, opts *configOptions) {
 	flags.BoolVar(&opts.tun, "tun", false, "enable TUN (--tun=false disables it)")
 	flags.StringVar(&opts.tunStack, "tun-stack", "", "TUN stack: system, gvisor, or mixed (requires --tun)")
 	flags.StringVar(&opts.tunDevice, "tun-device", "", "TUN device name (requires --tun)")
+	flags.IntVar(&opts.tunRouteTable, "tun-route-table", 0, "TUN iproute2 table index (requires --tun)")
+	flags.IntVar(&opts.tunRuleIndex, "tun-rule-index", 0, "TUN iproute2 rule index (requires --tun)")
 	flags.StringArrayVar(&opts.tunExclude, "tun-exclude", nil, "exclude CIDR from TUN routes (repeatable; requires --tun)")
 }
 
@@ -150,6 +155,12 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	if changed("tun-device") {
 		overlay.TunDevice = config.StringPtr(opts.tunDevice)
 	}
+	if changed("tun-route-table") {
+		overlay.TunRouteTable = config.IntPtr(opts.tunRouteTable)
+	}
+	if changed("tun-rule-index") {
+		overlay.TunRuleIndex = config.IntPtr(opts.tunRuleIndex)
+	}
 	if changed("tun-exclude") {
 		overlay.TunExcludeRoutes = append([]string(nil), opts.tunExclude...)
 	}
@@ -178,6 +189,12 @@ func (opts *configOptions) validateTun(cmd *cobra.Command) error {
 		if opts.tunDevice == "" {
 			return fmt.Errorf("--tun-device requires a device name")
 		}
+	}
+	if changed("tun-route-table") && opts.tunRouteTable <= 0 {
+		return fmt.Errorf("--tun-route-table must be a positive index")
+	}
+	if changed("tun-rule-index") && opts.tunRuleIndex <= 0 {
+		return fmt.Errorf("--tun-rule-index must be a positive index")
 	}
 	if changed("tun-exclude") {
 		if len(opts.tunExclude) == 0 {
@@ -353,6 +370,71 @@ func applyAutoInterfaceForGOOS(goos string, cmd *cobra.Command, mode string, opt
 	return true
 }
 
+const (
+	defaultTunDevice     = "Meta"
+	defaultTunRouteTable = 2022
+	defaultTunRuleIndex  = 9000
+)
+
+func isDefaultTunDevice(device string) bool {
+	device = strings.TrimSpace(device)
+	return device == "" || strings.EqualFold(device, defaultTunDevice)
+}
+
+func tunIndexHash(value string) uint32 {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(value))
+	return hash.Sum32()
+}
+
+// deriveTunIndexes gives a non-default TUN device its own iproute2 table and
+// rule indexes so a second instance does not collide with mihomo's 2022/9000.
+func deriveTunIndexes(device string) (table, rule int) {
+	table = 1000 + int(tunIndexHash("table:"+device)%8000)
+	if table == defaultTunRouteTable {
+		table++
+	}
+	rule = 10000 + int(tunIndexHash("rule:"+device)%8000)
+	if rule == defaultTunRuleIndex {
+		rule++
+	}
+	return table, rule
+}
+
+func tunInt(value any) int {
+	switch value := value.(type) {
+	case int:
+		return value
+	case int64:
+		return int(value)
+	case uint64:
+		return int(value)
+	case float64:
+		return int(value)
+	}
+	return 0
+}
+
+// applyTunAutoIndexes fills the iproute2 indexes only when a non-default
+// --tun-device was requested and neither flags nor the config supplied them.
+func applyTunAutoIndexes(opts *configOptions, cfg map[string]any) {
+	if opts == nil || cfg == nil || !tunEnabled(cfg) || isDefaultTunDevice(opts.tunDevice) {
+		return
+	}
+	tun, ok := cfg["tun"].(map[string]any)
+	if !ok {
+		tun = map[string]any{}
+		cfg["tun"] = tun
+	}
+	table, rule := deriveTunIndexes(opts.tunDevice)
+	if opts.tunRouteTable == 0 && tunInt(tun["iproute2-table-index"]) == 0 {
+		tun["iproute2-table-index"] = table
+	}
+	if opts.tunRuleIndex == 0 && tunInt(tun["iproute2-rule-index"]) == 0 {
+		tun["iproute2-rule-index"] = rule
+	}
+}
+
 func tunEnabled(cfg map[string]any) bool {
 	tun, ok := cfg["tun"].(map[string]any)
 	if !ok {
@@ -479,6 +561,7 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 	}
 	config.SetSelectSpecs(base, specs)
 	config.ApplyOverlay(base, overlay)
+	applyTunAutoIndexes(opts, base)
 	config.ApplyGeoXDefaults(base)
 	return base, nil
 }

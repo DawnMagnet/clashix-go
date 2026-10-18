@@ -19,6 +19,8 @@ type Overlay struct {
 	TunEnable        *bool
 	TunStack         *string
 	TunDevice        *string
+	TunRouteTable    *int
+	TunRuleIndex     *int
 	TunExcludeRoutes []string
 }
 
@@ -64,7 +66,7 @@ func ApplyOverlay(cfg map[string]any, overlay Overlay) {
 	if overlay.RoutingMark != nil {
 		cfg["routing-mark"] = *overlay.RoutingMark
 	}
-	if overlay.TunEnable != nil || overlay.TunStack != nil || overlay.TunDevice != nil || overlay.TunExcludeRoutes != nil {
+	if overlay.TunEnable != nil || overlay.TunStack != nil || overlay.TunDevice != nil || overlay.TunRouteTable != nil || overlay.TunRuleIndex != nil || overlay.TunExcludeRoutes != nil {
 		tun := ensureMap(cfg, "tun")
 		if overlay.TunEnable != nil {
 			tun["enable"] = *overlay.TunEnable
@@ -74,6 +76,12 @@ func ApplyOverlay(cfg map[string]any, overlay Overlay) {
 		}
 		if overlay.TunDevice != nil {
 			tun["device"] = *overlay.TunDevice
+		}
+		if overlay.TunRouteTable != nil {
+			tun["iproute2-table-index"] = *overlay.TunRouteTable
+		}
+		if overlay.TunRuleIndex != nil {
+			tun["iproute2-rule-index"] = *overlay.TunRuleIndex
 		}
 		if overlay.TunExcludeRoutes != nil {
 			routes := make([]any, len(overlay.TunExcludeRoutes))

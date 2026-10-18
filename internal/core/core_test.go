@@ -131,6 +131,18 @@ func TestTunFailureBusySuggestsTunDevice(t *testing.T) {
 	}
 }
 
+func TestTunFailureEEXISTSuggestsIndexFlags(t *testing.T) {
+	err := tunFailure("system", "cxtun", "add route 0: file exists")
+	if !errors.Is(err, ErrTunNotStarted) {
+		t.Fatalf("tunFailure error = %v, want ErrTunNotStarted", err)
+	}
+	for _, want := range []string{"cxtun", "iproute2", "2022", "9000", "--tun-route-table", "--tun-rule-index", "file exists"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
 func TestTunConfigured(t *testing.T) {
 	if tunConfigured(map[string]any{"tun": map[string]any{"enable": true}}) != true {
 		t.Error("tunConfigured missed an enabled TUN")

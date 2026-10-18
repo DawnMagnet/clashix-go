@@ -393,6 +393,218 @@ func TestServeWritesConfigAndStops(t *testing.T) {
 	}
 }
 
+func TestServeUsesCacheWhenSubscriptionHangs(t *testing.T) {
+	useFakeCore(t)
+	state := t.TempDir()
+	cache := map[string]any{
+		"mixed-port": 0,
+		"mode":       "rule",
+		"proxies":    []any{},
+		"rules":      []any{"MATCH,DIRECT"},
+	}
+	if err := config.Write(config.DefaultConfigPath(state), cache); err != nil {
+		t.Fatal(err)
+	}
+
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer func() {
+		close(release)
+		server.Close()
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
+	var stderr strings.Builder
+	root := NewRoot("dev")
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--dir", state, "--sub", server.URL})
+	started := time.Now()
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("serve took %s with a hanging subscription", elapsed)
+	}
+	if lastFakeCore == nil || lastFakeCore.config["mixed-port"] != 0 {
+		t.Fatalf("core did not start from the cached config: %#v", lastFakeCore)
+	}
+	if !strings.Contains(stderr.String(), "using cached configuration") {
+		t.Errorf("serve did not report the cached config: %q", stderr.String())
+	}
+}
+
+func TestServeUsesLastGoodWhenActiveConfigInvalid(t *testing.T) {
+	useFakeCore(t)
+	state := t.TempDir()
+	path := config.DefaultConfigPath(state)
+	lastGood := []byte("mixed-port: 0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n")
+	if err := os.WriteFile(config.LastGoodPath(path), lastGood, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("not: [valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+	var stderr strings.Builder
+	root := NewRoot("dev")
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--dir", state, "--sub", server.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil {
+		t.Fatal("core did not start from last-good")
+	}
+	if !strings.Contains(stderr.String(), "using cached configuration") || !strings.Contains(stderr.String(), "last-good") {
+		t.Errorf("serve did not report last-good fallback: %q", stderr.String())
+	}
+}
+
+func TestServeCachedConfigRefreshesInBackground(t *testing.T) {
+	fake := useFakeCore(t)
+	state := t.TempDir()
+	cache := map[string]any{"mixed-port": 0, "mode": "rule", "proxies": []any{}, "rules": []any{"MATCH,DIRECT"}}
+	if err := config.Write(config.DefaultConfigPath(state), cache); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("mixed-port: 0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\nx-refreshed: true\n"))
+	}))
+	defer server.Close()
+
+	applied := make(chan map[string]any, 1)
+	fake.apply = func(data []byte) error {
+		cfg, err := config.Parse(data)
+		if err != nil {
+			return err
+		}
+		applied <- cfg
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root := NewRoot("dev")
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--dir", state, "--sub", server.URL})
+	done := make(chan error, 1)
+	go func() { done <- root.Execute() }()
+
+	select {
+	case cfg := <-applied:
+		if cfg["x-refreshed"] != true {
+			t.Errorf("background refresh applied %#v", cfg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("background subscription refresh was not applied")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+}
+
+func TestServeCachedConfigSurvivesFailedRefresh(t *testing.T) {
+	useFakeCore(t)
+	state := t.TempDir()
+	cache := map[string]any{"mixed-port": 0, "mode": "rule", "proxies": []any{}, "rules": []any{"MATCH,DIRECT"}}
+	if err := config.Write(config.DefaultConfigPath(state), cache); err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+	var stderr strings.Builder
+	root := NewRoot("dev")
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--dir", state, "--sub", server.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "configuration active") {
+		t.Errorf("serve did not start from cache: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "startup subscription refresh") || !strings.Contains(stderr.String(), "failed") {
+		t.Errorf("serve did not warn about the failed refresh: %q", stderr.String())
+	}
+}
+
+func TestServeUIDisabledDoesNotLogPanel(t *testing.T) {
+	useFakeCore(t)
+	oldBundled, oldExtract := panelBundled, extractPanel
+	panelBundled = func() bool { return true }
+	extractPanel = func(dir string) (string, error) {
+		target := filepath.Join(dir, "ui")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return "", err
+		}
+		return target, os.WriteFile(filepath.Join(target, "index.html"), []byte("<html>panel</html>"), 0o644)
+	}
+	t.Cleanup(func() {
+		panelBundled, extractPanel = oldBundled, oldExtract
+	})
+
+	state := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mixed-port: 0\nexternal-controller: 127.0.0.1:0\nexternal-ui: /tmp/old-panel\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	var stderr strings.Builder
+	root := NewRoot("dev")
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--config", configPath, "--dir", state, "--ui=false"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if strings.Contains(stderr.String(), "web panel:") {
+		t.Errorf("--ui=false printed a panel URL: %q", stderr.String())
+	}
+	if lastFakeCore != nil {
+		if _, exists := lastFakeCore.config["external-ui"]; exists {
+			t.Errorf("--ui=false injected external-ui: %#v", lastFakeCore.config["external-ui"])
+		}
+	}
+}
+
 func TestServeKeepsAutoInterfaceOutOfStateConfig(t *testing.T) {
 	useFakeCore(t)
 	oldDetect := detectHostTun
@@ -859,6 +1071,65 @@ func TestRunTunFlagOverlay(t *testing.T) {
 	routes, ok := tun["route-exclude-address"].([]any)
 	if !ok || len(routes) != 2 || routes[0] != "10.0.0.0/8" || routes[1] != "2001:db8::/32" {
 		t.Errorf("route-exclude-address = %#v", tun["route-exclude-address"])
+	}
+	wantTable, wantRule := deriveTunIndexes("cx0")
+	if tun["iproute2-table-index"] != wantTable || tun["iproute2-rule-index"] != wantRule {
+		t.Errorf("iproute2 indexes = %v/%v, want %d/%d", tun["iproute2-table-index"], tun["iproute2-rule-index"], wantTable, wantRule)
+	}
+	if wantTable == 2022 || wantRule == 9000 {
+		t.Errorf("derived indexes reused defaults: %d/%d", wantTable, wantRule)
+	}
+}
+
+func TestTunIndexFlagsAndAutoDerive(t *testing.T) {
+	newOptions := func(args ...string) (*cobra.Command, *configOptions) {
+		cmd := &cobra.Command{}
+		opts := &configOptions{}
+		addTunFlags(cmd, opts)
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := opts.validateTun(cmd); err != nil {
+			t.Fatal(err)
+		}
+		return cmd, opts
+	}
+
+	cmd, opts := newOptions("--tun", "--tun-device", "cxtun9", "--tun-route-table", "3456", "--tun-rule-index", "7890")
+	cfg := map[string]any{}
+	config.ApplyOverlay(cfg, opts.overlay(cmd))
+	applyTunAutoIndexes(opts, cfg)
+	tun := cfg["tun"].(map[string]any)
+	if tun["iproute2-table-index"] != 3456 || tun["iproute2-rule-index"] != 7890 {
+		t.Errorf("explicit indexes = %#v", tun)
+	}
+
+	cmd, opts = newOptions("--tun", "--tun-device", "cxtun9")
+	cfg = map[string]any{}
+	config.ApplyOverlay(cfg, opts.overlay(cmd))
+	applyTunAutoIndexes(opts, cfg)
+	tun = cfg["tun"].(map[string]any)
+	wantTable, wantRule := deriveTunIndexes("cxtun9")
+	if tun["iproute2-table-index"] != wantTable || tun["iproute2-rule-index"] != wantRule {
+		t.Errorf("derived indexes = %#v, want %d/%d", tun, wantTable, wantRule)
+	}
+
+	cmd, opts = newOptions("--tun", "--tun-device", "cxtun9")
+	cfg = map[string]any{"tun": map[string]any{"enable": true, "iproute2-table-index": 2222, "iproute2-rule-index": 7777}}
+	config.ApplyOverlay(cfg, opts.overlay(cmd))
+	applyTunAutoIndexes(opts, cfg)
+	tun = cfg["tun"].(map[string]any)
+	if tun["iproute2-table-index"] != 2222 || tun["iproute2-rule-index"] != 7777 {
+		t.Errorf("configured indexes were overwritten: %#v", tun)
+	}
+
+	cmd, opts = newOptions("--tun", "--tun-device", "Meta")
+	cfg = map[string]any{}
+	config.ApplyOverlay(cfg, opts.overlay(cmd))
+	applyTunAutoIndexes(opts, cfg)
+	tun = cfg["tun"].(map[string]any)
+	if _, exists := tun["iproute2-table-index"]; exists {
+		t.Errorf("default device derived an index: %#v", tun)
 	}
 }
 

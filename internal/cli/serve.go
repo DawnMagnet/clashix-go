@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
+	"github.com/DawnMagnet/clashix-go/internal/notify"
 	"github.com/DawnMagnet/clashix-go/internal/ui"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -75,13 +77,34 @@ func newServeCmd() *cobra.Command {
 			if uiSet {
 				overlay.ExternalController = config.StringPtr(resolvedUI)
 			}
+			uiDisabled := cmd.Flags().Changed("ui") && !ui && !cmd.Flags().Changed("ui-addr")
 
-			cfg, err := loadEffectiveConfig(ctx, &opts, overlay, true, configPath)
-			if err != nil {
-				if ctx.Err() != nil {
-					return nil
+			notifier := notify.New()
+			defer notifier.Close()
+			notifier.Status("loading configuration")
+
+			var cfg map[string]any
+			cacheUsed := false
+			if len(opts.subscriptions) > 0 {
+				cached, path, cacheErr := loadCachedServeConfig(ctx, configPath, &opts, overlay)
+				switch {
+				case cached != nil:
+					cfg = cached
+					cacheUsed = true
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: using cached configuration %s; subscriptions will refresh in the background\n", path)
+				case cacheErr != nil:
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: cached configuration is not usable: %v\n", cacheErr)
 				}
-				return err
+			}
+			if cfg == nil {
+				loaded, loadErr := loadEffectiveConfig(ctx, &opts, overlay, true, configPath)
+				if loadErr != nil {
+					if ctx.Err() != nil {
+						return nil
+					}
+					return loadErr
+				}
+				cfg = loaded
 			}
 			if ctx.Err() != nil {
 				return nil
@@ -92,7 +115,10 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			panelURL, err := setupPanel(stateDir, cfg, true, true, "serve", cmd)
+			if uiDisabled {
+				delete(cfg, "external-ui")
+			}
+			panelURL, err := setupPanel(stateDir, cfg, !uiDisabled, true, "serve", cmd)
 			if err != nil {
 				return err
 			}
@@ -111,6 +137,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 
+			notifier.Status("starting core")
 			engine := newCore()
 			if err := engine.Start(ctx, stateDir, data); err != nil {
 				if ctx.Err() != nil {
@@ -119,67 +146,83 @@ func newServeCmd() *cobra.Command {
 				return fmt.Errorf("start core: %w", err)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: configuration active in %s\n", stateDir)
+			notifier.Ready("configuration active")
 			logPanelURL(cmd, "serve", panelURL)
 			lastGoodData := append([]byte(nil), data...)
 			lastGoodStateData := append([]byte(nil), stateData...)
 
-			reload := func(reason string) {
-				reloadOverlay := opts.overlay(cmd)
+			type pendingReload struct {
+				reason string
+				cfg    map[string]any
+				err    error
+			}
+			reloadOverlay := func() config.Overlay {
+				o := opts.overlay(cmd)
 				if uiSet {
-					reloadOverlay.ExternalController = config.StringPtr(resolvedUI)
+					o.ExternalController = config.StringPtr(resolvedUI)
 				}
-				newCfg, err := loadEffectiveConfig(ctx, &opts, reloadOverlay, true, configPath)
-				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) failed: %v\n", reason, err)
-					return
+				return o
+			}
+			loadReload := func(reason string, o config.Overlay) pendingReload {
+				cfg, err := loadEffectiveConfig(ctx, &opts, o, true, configPath)
+				return pendingReload{reason: reason, cfg: cfg, err: err}
+			}
+			applyReload := func(result pendingReload) bool {
+				if result.err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) failed: %v\n", result.reason, result.err)
+					return false
 				}
+				newCfg := result.cfg
 				newAutoInterface := applyAutoInterface(cmd, "serve", &opts, newCfg)
 				warnInsecureController(cmd, "serve", newCfg)
 				newSecret, err := ensureServeControllerSecret(cmd, stateDir, newCfg, secret)
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) secret failed: %v\n", reason, err)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) secret failed: %v\n", result.reason, err)
+					return false
 				}
-				newPanelURL, err := setupPanel(stateDir, newCfg, true, false, "serve", cmd)
+				if uiDisabled {
+					delete(newCfg, "external-ui")
+				}
+				newPanelURL, err := setupPanel(stateDir, newCfg, !uiDisabled, false, "serve", cmd)
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) panel failed: %v\n", reason, err)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) panel failed: %v\n", result.reason, err)
+					return false
 				}
 				newData, err := config.Marshal(newCfg)
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) encode failed: %v\n", reason, err)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) encode failed: %v\n", result.reason, err)
+					return false
 				}
 				if err := validateConfig(stateDir, newData); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) validation failed: %v\n", reason, err)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) validation failed: %v\n", result.reason, err)
+					return false
 				}
 				newStateData, err := marshalStateConfig(newCfg, newAutoInterface)
 				if err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) encode failed: %v\n", reason, err)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) encode failed: %v\n", result.reason, err)
+					return false
 				}
 				if err := config.WriteYAML(configPath, newStateData); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) save failed: %v\n", reason, err)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) save failed: %v\n", result.reason, err)
+					return false
 				}
 				applier, ok := engine.(core.Applier)
 				if !ok {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) unsupported by core\n", reason)
-					return
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) unsupported by core\n", result.reason)
+					return false
 				}
 				if err := applier.Apply(stateDir, newData); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) apply failed: %v\n", reason, err)
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) apply failed: %v\n", result.reason, err)
 					if errors.Is(err, core.ErrTunNotStarted) {
 						if rollbackErr := applier.Apply(stateDir, lastGoodData); rollbackErr != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback failed: %v\n", reason, rollbackErr)
+							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback failed: %v\n", result.reason, rollbackErr)
 						} else if saveErr := config.WriteYAML(configPath, lastGoodStateData); saveErr != nil {
-							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback could not restore %s: %v\n", reason, configPath, saveErr)
+							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback could not restore %s: %v\n", result.reason, configPath, saveErr)
 						} else {
-							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) rolled back to previous working configuration\n", reason)
+							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) rolled back to previous working configuration\n", result.reason)
 						}
 					}
-					return
+					return false
 				}
 				lastGoodData = append([]byte(nil), newData...)
 				lastGoodStateData = append([]byte(nil), newStateData...)
@@ -188,7 +231,29 @@ func newServeCmd() *cobra.Command {
 					panelURL = newPanelURL
 					logPanelURL(cmd, "serve", panelURL)
 				}
-				fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reloaded configuration (%s)\n", reason)
+				fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reloaded configuration (%s)\n", result.reason)
+				return true
+			}
+			reload := func(reason string) {
+				notifier.Reloading("reloading configuration (" + reason + ")")
+				if applyReload(loadReload(reason, reloadOverlay())) {
+					notifier.Ready("configuration reloaded (" + reason + ")")
+				} else {
+					notifier.Ready("reload failed (" + reason + "); keeping previous configuration")
+				}
+			}
+
+			startupRefreshCh := make(chan pendingReload, 1)
+			startupRefreshPending := cacheUsed && len(opts.subscriptions) > 0
+			if startupRefreshPending {
+				refreshOverlay := reloadOverlay()
+				go func() {
+					result := loadReload("startup subscription refresh", refreshOverlay)
+					select {
+					case startupRefreshCh <- result:
+					case <-ctx.Done():
+					}
+				}()
 			}
 
 			// A SIGHUP received before the core was ready remains queued in
@@ -203,19 +268,34 @@ func newServeCmd() *cobra.Command {
 			for {
 				select {
 				case <-ctx.Done():
+					notifier.Stopping("shutting down")
 					if err := engine.Stop(); err != nil {
 						return fmt.Errorf("stop core: %w", err)
 					}
 					return nil
+				case result := <-startupRefreshCh:
+					startupRefreshCh = nil
+					if ctx.Err() != nil || !startupRefreshPending {
+						continue
+					}
+					startupRefreshPending = false
+					notifier.Reloading("refreshing subscriptions after startup")
+					if applyReload(result) {
+						notifier.Ready("subscriptions refreshed after startup")
+					} else {
+						notifier.Ready("subscription refresh failed; keeping cached configuration")
+					}
 				case <-reloadCh:
 					if ctx.Err() != nil {
 						continue
 					}
+					startupRefreshPending = false
 					reload("SIGHUP")
 				case <-tickerC:
 					if ctx.Err() != nil {
 						continue
 					}
+					startupRefreshPending = false
 					reload("subscription interval")
 				}
 			}
@@ -618,6 +698,42 @@ func isLoopbackAddress(address string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// loadCachedServeConfig returns the active or last-good state config when it
+// still validates, so a subscription fetch cannot take the service down.
+func loadCachedServeConfig(ctx context.Context, path string, opts *configOptions, overlay config.Overlay) (map[string]any, string, error) {
+	var errs []error
+	for _, candidate := range []string{path, config.LastGoodPath(path)} {
+		if candidate == "" {
+			continue
+		}
+		if _, err := os.Stat(candidate); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("inspect %s: %w", candidate, err))
+			}
+			continue
+		}
+		cachedOpts := *opts
+		cachedOpts.configPath = candidate
+		cachedOpts.subscriptions = nil
+		cfg, err := loadEffectiveConfig(ctx, &cachedOpts, overlay, false, "")
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", candidate, err))
+			continue
+		}
+		data, err := config.Marshal(cfg)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", candidate, err))
+			continue
+		}
+		if err := validateConfig(filepath.Dir(path), data); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", candidate, err))
+			continue
+		}
+		return cfg, candidate, nil
+	}
+	return nil, "", errors.Join(errs...)
 }
 
 func setupPanel(stateDir string, cfg map[string]any, allow, refresh bool, mode string, cmd *cobra.Command) (string, error) {

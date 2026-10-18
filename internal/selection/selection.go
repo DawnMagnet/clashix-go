@@ -148,16 +148,8 @@ func regionFor(word string) *regionAlias {
 	return nil
 }
 
-func isShortCode(term string) bool {
-	if len(term) == 0 || len(term) > 2 {
-		return false
-	}
-	for _, r := range term {
-		if r < 'a' || r > 'z' {
-			return false
-		}
-	}
-	return true
+func isShortTerm(term string) bool {
+	return len(term) <= 3
 }
 
 func containsToken(candidate, token string) bool {
@@ -172,7 +164,7 @@ func containsToken(candidate, token string) bool {
 }
 
 func termMatches(term, candidate string) bool {
-	if isShortCode(term) {
+	if isShortTerm(term) {
 		return containsToken(candidate, term)
 	}
 	return strings.Contains(candidate, term)
@@ -190,20 +182,35 @@ func wordMatches(word, candidate string) bool {
 	return termMatches(word, candidate)
 }
 
-var protocolAliases = map[string][]string{
-	"ss":     {"shadowsocks"},
-	"ssr":    {"shadowsocksr"},
-	"socks":  {"socks5"},
-	"hy":     {"hysteria"},
-	"hy2":    {"hysteria2"},
-	"wg":     {"wireguard"},
-	"anytls": {"anytls"},
-	"vless":  {"vless"},
-	"vmess":  {"vmess"},
-	"trojan": {"trojan"},
-	"tuic":   {"tuic"},
-	"mieru":  {"mieru"},
-	"snell":  {"snell"},
+// protocolWords maps a bare query word to the mihomo adapter type it selects.
+// Words in this table are treated as type matches, not name substrings, so
+// "trojan" selects Trojan nodes instead of nodes whose names contain "TR".
+var protocolWords = map[string]string{
+	"ss":           "ss",
+	"shadowsocks":  "ss",
+	"ssr":          "ssr",
+	"shadowsocksr": "ssr",
+	"socks":        "socks5",
+	"socks5":       "socks5",
+	"hy":           "hysteria",
+	"hysteria":     "hysteria",
+	"hy2":          "hysteria2",
+	"hysteria2":    "hysteria2",
+	"wg":           "wireguard",
+	"wireguard":    "wireguard",
+	"anytls":       "anytls",
+	"vless":        "vless",
+	"vmess":        "vmess",
+	"trojan":       "trojan",
+	"tuic":         "tuic",
+	"mieru":        "mieru",
+	"snell":        "snell",
+	"http":         "http",
+}
+
+func protocolWord(word string) (string, bool) {
+	canonical, ok := protocolWords[strings.ToLower(strings.TrimSpace(word))]
+	return canonical, ok
 }
 
 func typeMatches(candidateType, protocol string) bool {
@@ -212,11 +219,14 @@ func typeMatches(candidateType, protocol string) bool {
 	if candidateType == "" || protocol == "" {
 		return false
 	}
+	if canonical, ok := protocolWord(protocol); ok {
+		protocol = canonical
+	}
 	if candidateType == protocol {
 		return true
 	}
-	for _, alias := range protocolAliases[protocol] {
-		if candidateType == alias {
+	for word, canonical := range protocolWords {
+		if canonical == protocol && candidateType == word {
 			return true
 		}
 	}
@@ -243,6 +253,11 @@ func (m *matcher) matchesCandidate(name, kind string) bool {
 func (m *matcher) termMatches(term, candidate, kind string) bool {
 	if strings.HasPrefix(term, "type:") {
 		return typeMatches(kind, term[len("type:"):])
+	}
+	if kind != "" {
+		if canonical, ok := protocolWord(term); ok {
+			return typeMatches(kind, canonical)
+		}
 	}
 	return wordMatches(term, candidate)
 }
@@ -821,6 +836,10 @@ func (m *matcher) protocolMatches(kind string) int {
 		protocol := term
 		if strings.HasPrefix(term, "type:") {
 			protocol = strings.TrimSpace(term[len("type:"):])
+		} else if canonical, ok := protocolWord(term); ok {
+			protocol = canonical
+		} else {
+			continue
 		}
 		if typeMatches(kind, protocol) {
 			count++
@@ -871,6 +890,9 @@ func (m *matcher) sharedTokens(candidate string) int {
 		if strings.HasPrefix(term, "type:") {
 			continue
 		}
+		if _, ok := protocolWord(term); ok {
+			continue
+		}
 		if _, ok := tokens[term]; ok {
 			count++
 			continue
@@ -901,9 +923,13 @@ func (m *matcher) textPattern() string {
 	}
 	terms := make([]string, 0, len(m.terms))
 	for _, term := range m.terms {
-		if !strings.HasPrefix(term, "type:") {
-			terms = append(terms, term)
+		if strings.HasPrefix(term, "type:") || isShortTerm(term) {
+			continue
 		}
+		if _, ok := protocolWord(term); ok {
+			continue
+		}
+		terms = append(terms, term)
 	}
 	return strings.Join(terms, " ")
 }

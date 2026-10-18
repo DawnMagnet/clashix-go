@@ -131,22 +131,27 @@ SPEC forms:
   selected group.
 
 Closest candidates are ranked by real similarity: a protocol/type match first
-(a bare word equal to a proxy type counts, so `trojan` ranks nodes whose `type`
-is `trojan`), then a region alias match, then shared tokens, then normalized
-longest common substring and shared characters, and finally the original group
-order. If a pattern matches proxies that exist under top-level `proxies` but are
-members of no select group, the error says so explicitly and lists them.
+(bare protocol words and `type:` selectors count, so `trojan` ranks nodes whose
+`type` is `trojan`), then a region alias match, then shared tokens, then
+normalized longest common substring and shared characters, and finally the
+original group order. If a pattern matches proxies that exist under top-level
+`proxies` but are members of no select group, the error says so explicitly and
+lists them.
 
 A pattern starting with `re:` is a case-insensitive Go regular expression.
 Otherwise every whitespace-separated word must match the candidate name with a
-case-insensitive substring, except two-letter region codes, which must match a
-whole token so `us` does not match `plus`. Region words expand to their flag and
-code aliases: 日本/japan/jp → JP 🇯🇵, 香港/hongkong/hk → HK 🇭🇰,
-台湾/taiwan/tw → TW 🇹🇼, 新加坡/singapore/sg → SG 🇸🇬, 美国/usa/us → US 🇺🇸,
-韩国/korea/kr → KR 🇰🇷, 英国/uk/gb → UK/GB 🇬🇧, 德国/germany/de → DE 🇩🇪,
-and 加拿大/canada/ca → CA 🇨🇦. `type:PROTO` matches the proxy's type and can be
-combined with words, for example `type:anytls`, `type:hysteria2`, or
-`type:hy2 hk`. There is no fuzzy subsequence fallback. Within each group, the
+case-insensitive substring, except words of three characters or fewer, which
+must match a whole token so `us` does not match `plus` and `syd` does not match
+`Sydney`. Region words expand to their flag and code aliases:
+日本/japan/jp → JP 🇯🇵, 香港/hongkong/hk → HK 🇭🇰, 台湾/taiwan/tw → TW 🇹🇼,
+新加坡/singapore/sg → SG 🇸🇬, 美国/usa/us → US 🇺🇸, 韩国/korea/kr → KR 🇰🇷,
+英国/uk/gb → UK/GB 🇬🇧, 德国/germany/de → DE 🇩🇪, 加拿大/canada/ca → CA 🇨🇦.
+`type:PROTO` matches the proxy's type and can be combined with words, for
+example `type:anytls`, `type:hysteria2`, or `type:hy2 hk`. Bare protocol words
+(`trojan`, `anytls`, `hy2`/`hysteria2`, `hysteria`, `vmess`, `vless`,
+`ss`/`shadowsocks`, `ssr`, `tuic`, `wireguard`/`wg`, `socks5`, `http`, `snell`)
+behave like `type:PROTO`: they match and select that adapter type instead of a
+name substring. There is no fuzzy subsequence fallback. Within each group, the
 first matching member in member order wins. Without a selection,
 placeholder/info nodes (reserved or empty servers, and names containing traffic
 expiry/reset/website/support markers) are skipped when choosing every select
@@ -168,6 +173,12 @@ gracefully. On Unix, SIGHUP re-reads the configuration sources, validates the
 result, and applies it without replacing the last-good file until validation
 succeeds. `--sub-interval 6h` periodically refreshes subscriptions and reloads.
 
+When subscriptions are configured and a valid `<state-dir>/config.yaml` or
+`config.yaml.last-good` exists, `cx serve` starts the core from it immediately
+and refreshes subscriptions in the background. A failed fetch or invalid update
+logs a warning and leaves the running configuration in place; startup fails
+only when no usable configuration exists at all.
+
 When any network controller endpoint (`external-controller` or
 `external-controller-tls`) is enabled and the effective config has no secret,
 `cx serve` generates a random controller secret at startup, persists it in
@@ -185,7 +196,9 @@ enabled and the binary was built with `-tags ui`. The boolean `--ui` flag (or a
 boolean-like `CX_UI`, for example `1` or `true`) enables the controller and
 panel. `--ui-addr ADDR` (or `CX_UI_ADDR`) chooses the bind address and implies
 `--ui`; the default is `127.0.0.1:9090`. The login URL is printed at startup.
-Panel version, checksum, and MIT license are recorded in
+An explicit `--ui=false` does not serve or announce the bundled panel, even if
+a controller from the config stays enabled. Panel version, checksum, and MIT
+license are recorded in
 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
 
 ```sh
@@ -206,6 +219,12 @@ sudo install -m 0644 packaging/systemd/cx.service /etc/systemd/system/cx.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now cx
 ```
+
+The unit uses `Type=notify` with `NotifyAccess=main` and `TimeoutStartSec=120s`.
+`READY=1` is sent after the core and any enabled TUN are up; reloads send
+`RELOADING=1` with `MONOTONIC_USEC` followed by `READY=1`, and shutdown sends
+`STOPPING=1`. Short status messages and the initial health-check start/result
+appear in the journal.
 
 The packaged unit uses `/var/lib/cx` as its state directory. Seed it first with
 `cx sub update --dir /var/lib/cx --sub URL` (run as root), or copy a config to
@@ -292,8 +311,12 @@ failed reload logs the error, re-applies the previous working configuration,
 and keeps the service alive.
 
 The flags are `--tun`, `--tun-stack system|gvisor|mixed`, `--tun-device NAME`,
-and repeatable `--tun-exclude CIDR`; they override the
-config/override/`tun` section. On a
+`--tun-route-table N`, `--tun-rule-index N`, and repeatable
+`--tun-exclude CIDR`; they override the config/override/`tun` section. The last
+two map to mihomo's `iproute2-table-index`/`iproute2-rule-index`. With a
+non-default `--tun-device` and no explicit indexes, `cx` derives distinct values
+(avoiding 2022/9000) so a second instance does not collide; an `EEXIST`/`file
+exists` TUN error suggests these flags. On a
 public server, exclude private, loopback, link-local, multicast, broadcast,
 CGNAT, and metadata ranges, and keep local/cloud names out of fake-IP. A
 ready-to-merge fragment with system stack, automatic routing/interface
@@ -587,21 +610,25 @@ SPEC 形式：
 - `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。精确组规则在裸模式之后
   执行，并且优先；只有这类错误会点名具体选择组。
 
-最接近候选按真实相似度排序：先看协议/type 匹配（裸词等于代理 type 也算，
-例如 `trojan` 会优先列出 type 为 `trojan` 的节点），再看地区别名匹配、共享
-token、归一化最长公共子串与共享字符，最后才按原始组顺序。若模式匹配到存在于
-顶层 `proxies`、但不属于任何选择组的代理，错误信息会明确说明这一点并列出
-这些代理。
+最接近候选按真实相似度排序：先看协议/type 匹配（裸协议词与 `type:` 选择器
+都算，例如 `trojan` 会优先列出 type 为 `trojan` 的节点），再看地区别名匹配、
+共享 token、归一化最长公共子串与共享字符，最后才按原始组顺序。若模式匹配到
+存在于顶层 `proxies`、但不属于任何选择组的代理，错误信息会明确说明这一点并
+列出这些代理。
 
 以 `re:` 开头的模式是不区分大小写的 Go 正则；否则按空白拆分，每个词都必须
-不区分大小写地匹配候选名称的子串；但两字母地区代码必须作为完整 token 匹配，因此
-`us` 不会匹配 `plus`。地区词会展开为对应旗帜和代码别名：
+不区分大小写地匹配候选名称的子串；但三个字符及以下的词必须作为完整 token
+匹配，因此 `us` 不会匹配 `plus`，`syd` 也不会匹配 `Sydney`。地区词会展开为
+对应旗帜和代码别名：
 日本/japan/jp → JP 🇯🇵，香港/hongkong/hk → HK 🇭🇰，台湾/taiwan/tw → TW 🇹🇼，
 新加坡/singapore/sg → SG 🇸🇬，美国/usa/us → US 🇺🇸，韩国/korea/kr → KR 🇰🇷，
 英国/uk/gb → UK/GB 🇬🇧，德国/germany/de → DE 🇩🇪，加拿大/canada/ca → CA 🇨🇦。
 `type:PROTO` 匹配代理的 type 字段，可与普通词组合，例如 `type:anytls`、
-`type:hysteria2`、`type:hy2 hk`。不再有模糊子序列回退。每个组内按成员顺序取
-第一个匹配项。未指定选择时，为每个选择组选择初始节点会跳过占位/信息节点
+`type:hysteria2`、`type:hy2 hk`。裸协议词（`trojan`、`anytls`、
+`hy2`/`hysteria2`、`hysteria`、`vmess`、`vless`、`ss`/`shadowsocks`、`ssr`、
+`tuic`、`wireguard`/`wg`、`socks5`、`http`、`snell`）等同于 `type:PROTO`：
+按适配器类型匹配和选择，而不再作为名称子串。不再有模糊子序列回退。每个组内
+按成员顺序取第一个匹配项。未指定选择时，为每个选择组选择初始节点会跳过占位/信息节点
 （保留地址或空地址，以及名称含流量到期、重置、官网、客服等标记的节点）。
 组、`DIRECT` 和 `REJECT` 保持原样。
 
@@ -620,6 +647,11 @@ cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
 会重新读取配置来源、校验后应用，校验成功前不会替换 last-good 文件。
 `--sub-interval 6h` 可定期刷新订阅并重载。
 
+配置了订阅且存在可用的 `<state-dir>/config.yaml` 或
+`config.yaml.last-good` 时，`cx serve` 会立即用缓存配置启动核心，并在后台刷新
+订阅。拉取失败或新配置无效时只记录警告，继续使用当前运行配置；只有完全不存在
+可用配置且拉取失败时，启动才会失败。
+
 启用任一网络控制器端点（`external-controller` 或 `external-controller-tls`）
 且有效配置没有 secret 时，`cx serve` 会在启动时生成随机控制器 secret，以原子
 方式写入 `<state-dir>/controller-secret`（权限 `0600`），并只向 stderr 打印该
@@ -632,8 +664,9 @@ cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
 启用控制器且二进制使用 `-tags ui` 构建时，内置 metacubexd 面板会通过 `/ui/`
 提供。布尔标志 `--ui`（或布尔风格的 `CX_UI`，例如 `1`、`true`）会启用控制器
 和面板。`--ui-addr ADDR`（或 `CX_UI_ADDR`）用于指定监听地址，并隐含启用
-`--ui`；默认地址为 `127.0.0.1:9090`。启动时会打印登录 URL。面板版本、校验和
-与 MIT 许可证记录在 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
+`--ui`；默认地址为 `127.0.0.1:9090`。启动时会打印登录 URL。显式
+`--ui=false` 时不提供也不打印内置面板地址，即使配置中的控制器仍然启用。面板
+版本、校验和与 MIT 许可证记录在 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
@@ -653,6 +686,11 @@ sudo install -m 0644 packaging/systemd/cx.service /etc/systemd/system/cx.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now cx
 ```
+
+该单元使用 `Type=notify`、`NotifyAccess=main` 和 `TimeoutStartSec=120s`。核心
+应用完成且启用的 TUN 就绪后才发送 `READY=1`；重载前后发送带
+`MONOTONIC_USEC` 的 `RELOADING=1` 与 `READY=1`，退出时发送 `STOPPING=1`。
+简短状态消息和初始健康检查的开始/结果会写入 journal。
 
 该单元使用 `/var/lib/cx`。请先以 root 执行
 `cx sub update --dir /var/lib/cx --sub URL`，或把配置复制到
@@ -734,8 +772,12 @@ TUN 设备，并设置 `PrivateDevices=no`。
 cx 实例占用，并建议使用 `--tun-device NAME`。重载时打印错误、重新应用上一份
 可用配置，并保持服务运行。
 
-相关参数为 `--tun`、`--tun-stack system|gvisor|mixed`、`--tun-device NAME`
-和可重复的 `--tun-exclude CIDR`；它们优先于配置、覆盖文件和 `tun` 段。公网服务器应排除
+相关参数为 `--tun`、`--tun-stack system|gvisor|mixed`、`--tun-device NAME`、
+`--tun-route-table N`、`--tun-rule-index N` 和可重复的 `--tun-exclude CIDR`；
+它们优先于配置、覆盖文件和 `tun` 段。后两者对应 mihomo 的
+`iproute2-table-index`/`iproute2-rule-index`。使用非默认 `--tun-device` 且未显式
+指定索引时，`cx` 会派生不同值（避开 2022/9000），避免第二个实例冲突；
+`EEXIST`/`file exists` TUN 错误会提示这两个参数。公网服务器应排除
 私有、loopback、链路本地、组播、广播、CGNAT 和元数据地址段，并让本地/云域名
 不进入 fake-IP。可直接合并的配置片段见
 [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml)，包含

@@ -139,6 +139,8 @@ func TestApplyOverlay(t *testing.T) {
 		RoutingMark:        IntPtr(123),
 		TunEnable:          BoolPtr(true),
 		TunStack:           StringPtr("system"),
+		TunRouteTable:      IntPtr(3456),
+		TunRuleIndex:       IntPtr(7890),
 		TunExcludeRoutes:   []string{"10.0.0.0/8", "fc00::/7"},
 	}
 	ApplyOverlay(cfg, overlay)
@@ -169,6 +171,9 @@ func TestApplyOverlay(t *testing.T) {
 	}
 	if tun["enable"] != true || tun["stack"] != "system" || tun["auto-route"] != true || tun["auto-detect-interface"] != true {
 		t.Errorf("tun = %#v", tun)
+	}
+	if tun["iproute2-table-index"] != 3456 || tun["iproute2-rule-index"] != 7890 {
+		t.Errorf("tun iproute2 indexes = %#v", tun)
 	}
 	if tun["mtu"] != 9000 {
 		t.Errorf("tun.mtu = %v, want the existing value preserved", tun["mtu"])

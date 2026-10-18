@@ -59,6 +59,15 @@ All notable changes to this project are documented in this file.
   compressed artifact before `SHA256SUMS` is generated. Darwin is left
   uncompressed; FreeBSD is skipped because UPX 5.2.1 has no FreeBSD
   `amd64`/`arm64` support.
+- `cx serve` implements pure-Go sd_notify for systemd `Type=notify`: `READY=1`
+  after the core and any enabled TUN are up, `RELOADING=1` with
+  `MONOTONIC_USEC` then `READY=1` around reloads, `STOPPING=1` on shutdown, and
+  short `STATUS=` messages. Notifications are no-ops without `NOTIFY_SOCKET` or
+  on non-Linux.
+- TUN flags `--tun-route-table` and `--tun-rule-index` map to mihomo's
+  `iproute2-table-index` and `iproute2-rule-index`. A non-default
+  `--tun-device` derives distinct indexes when neither the flags nor the
+  config supply them, so a second TUN instance avoids the 2022/9000 conflict.
 
 ### Security
 
@@ -110,6 +119,18 @@ All notable changes to this project are documented in this file.
   Relay) or VPN apps. When the effective default route is a `utun`, `cx` logs a
   one-line hint to retry with `--interface en0` if proxy dials fail. Linux and
   Windows still auto-bind to the physical default interface.
+- `cx serve` starts immediately from a valid state-directory `config.yaml` or
+  `config.yaml.last-good` when subscriptions are configured, then refreshes
+  subscriptions in the background. A failed fetch or invalid update logs a
+  warning and keeps the running configuration; startup only fails when no
+  usable configuration exists.
+- Bare protocol words such as `trojan`, `anytls`, `hy2`/`hysteria2`, `ss`,
+  `vmess`, `vless`, `tuic`, `wg`, `socks5`, and `http` now select by adapter
+  type like `type:PROTO` instead of matching name substrings. Words of three
+  characters or fewer match only whole tokens in selection and ranking.
+- The systemd unit uses `Type=notify`, `NotifyAccess=main`, and
+  `TimeoutStartSec=120s`, and the initial health-check start/result is logged at
+  info level.
 - The systemd unit uses `Restart=always`; the launchd agent uses
   `KeepAlive=true`. Both retain reload support.
 - Normal `run`/`serve` shutdown suppresses mihomo's "Mihomo shutting down"
@@ -140,6 +161,9 @@ All notable changes to this project are documented in this file.
   UPX-compressed, how to restore an uncompressed binary (`upx -d` or build from
   source), why UPX must not be run on packed binaries, and the macOS host-TUN
   hint.
+- README (English and Chinese) documents cached startup with background
+  subscription refresh, sd_notify/systemd behavior, TUN iproute2 indexes,
+  protocol-word selection, and explicit `--ui=false` panel suppression.
 
 ### Fixed
 
@@ -164,6 +188,12 @@ All notable changes to this project are documented in this file.
 - Launchd and systemd reload behavior is documented and wired consistently.
 - `cx pack` warns when the target binary already contains a payload and replaces
   it instead of silently discarding the old payload.
+- TUN `EEXIST`/`file exists` errors now explain the iproute2 table/rule conflict
+  and suggest `--tun-route-table`/`--tun-rule-index`.
+- `--ui=false` no longer serves or prints the bundled web panel when a
+  controller from the config remains enabled.
+- Bare protocol selection no longer ranks unrelated `TR 01`/`TR 02` names first;
+  exact adapter type matches win.
 
 ## v0.1.0 - 2026-10-18
 

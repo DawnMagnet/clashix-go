@@ -36,6 +36,13 @@ func TestMatcher(t *testing.T) {
 		{name: "type hy2 alias", pattern: "type:hy2", candidate: "Hysteria 01", kind: "Hysteria2", want: true},
 		{name: "type combined with region", pattern: "type:anytls hk", candidate: "🇭🇰 AnyTLS 01", kind: "AnyTLS", want: true},
 		{name: "type mismatch", pattern: "type:anytls", candidate: "🇭🇰 AnyTLS 01", kind: "Hysteria2", want: false},
+		{name: "bare protocol selects by type", pattern: "trojan", candidate: "TR 01", kind: "Trojan", want: true},
+		{name: "bare protocol rejects other type", pattern: "trojan", candidate: "TR 01", kind: "VMess", want: false},
+		{name: "bare shadowsocks alias", pattern: "shadowsocks", candidate: "SS 01", kind: "Shadowsocks", want: true},
+		{name: "bare hy2 alias", pattern: "hy2", candidate: "Hysteria 01", kind: "Hysteria2", want: true},
+		{name: "bare http protocol", pattern: "http", candidate: "HTTP 01", kind: "HTTP", want: true},
+		{name: "three char term is not a substring", pattern: "syd", candidate: "Sydney 01", want: false},
+		{name: "three char term matches a token", pattern: "syd", candidate: "SYD 01", want: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -195,7 +202,7 @@ func TestClosestRanksProtocolAndRegionBeforeGroupOrder(t *testing.T) {
 		{name: "🇭🇰 HK 02", kind: "Trojan"},
 	}
 	got := closest(matcher, candidates, 4)
-	want := []string{"🇭🇰 HK 02", "🇯🇵 JP 01", "🇺🇸 US 01", "🇭🇰 HK 01"}
+	want := []string{"🇭🇰 HK 02", "🇺🇸 US 01", "🇯🇵 JP 01", "🇭🇰 HK 01"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("closest = %v, want %v", got, want)
@@ -209,16 +216,32 @@ func TestClosestRanksBareTypeWord(t *testing.T) {
 		t.Fatalf("newMatcher: %v", err)
 	}
 	candidates := []nodeCandidate{
-		{name: "🇭🇰 HK 01", kind: "Shadowsocks"},
+		{name: "TR 01", kind: "VMess"},
+		{name: "TR 02", kind: "VMess"},
 		{name: "🇭🇰 HK 02", kind: "Trojan"},
 		{name: "🇯🇵 JP 01", kind: "Trojan"},
 	}
-	got := closest(matcher, candidates, 3)
-	want := []string{"🇯🇵 JP 01", "🇭🇰 HK 02", "🇭🇰 HK 01"}
+	got := closest(matcher, candidates, 4)
+	want := []string{"🇭🇰 HK 02", "🇯🇵 JP 01", "TR 01", "TR 02"}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("closest = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestClosestRanksShortTermsOnTokenBoundaries(t *testing.T) {
+	matcher, err := newMatcher("us")
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	candidates := []nodeCandidate{
+		{name: "plus 01", kind: "Shadowsocks"},
+		{name: "🇺🇸 US 01", kind: "Shadowsocks"},
+	}
+	got := closest(matcher, candidates, 2)
+	if got[0] != "🇺🇸 US 01" {
+		t.Fatalf("closest = %v, want the US token first", got)
 	}
 }
 
@@ -287,11 +310,34 @@ func TestApplyRegionAndTypeSelection(t *testing.T) {
 	}
 }
 
+func TestApplyBareProtocolSelectsType(t *testing.T) {
+	proxyMap := testProxyMap(t,
+		[]map[string]any{
+			{"name": "TR 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇭🇰 HK 01", "type": "trojan", "server": "198.51.100.20", "port": 443, "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"TR 01", "🇭🇰 HK 01"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"TR 01", "🇭🇰 HK 01"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	if err := Apply(cfg, []string{"trojan"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Proxy"); got != "🇭🇰 HK 01" {
+		t.Errorf("bare protocol selection = %q, want the Trojan node", got)
+	}
+}
+
 func TestApplySelectionAndPlaceholders(t *testing.T) {
 	proxyMap := testProxyMap(t,
 		[]map[string]any{
 			{"name": "remaining", "type": "ss", "server": "10.255.255.255", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
-			{"name": "🇺🇸 [Hy2]US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 [Hy2]US 01", "type": "hysteria2", "server": "198.51.100.10", "port": 443, "password": "made-up"},
 			{"name": "🇯🇵 Tokyo 01", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
 		},
 		[]map[string]any{
@@ -352,7 +398,7 @@ func TestApplyDefaultSkipsPlaceholders(t *testing.T) {
 func TestApplyBarePatternAcrossSelectGroups(t *testing.T) {
 	proxyMap := testProxyMap(t,
 		[]map[string]any{
-			{"name": "🇺🇸 [Hy2]US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 [Hy2]US 01", "type": "hysteria2", "server": "198.51.100.10", "port": 443, "password": "made-up"},
 			{"name": "🇯🇵 Tokyo 01", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
 			{"name": "🇸🇬 Singapore 01", "type": "ss", "server": "198.51.100.30", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
 		},

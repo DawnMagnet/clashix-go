@@ -5,7 +5,10 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=120s
+# READY=1 is sent only after the core is applied and an enabled TUN is up.
 # The service keeps its active config and geodata under /var/lib/cx.
 # Seed it with `cx serve --config ...` or `cx sub update --dir /var/lib/cx --sub ...`.
 # Optional environment file (CX_SUB, CX_SELECT, CX_SECRET, CX_UI_ADDR, ...).

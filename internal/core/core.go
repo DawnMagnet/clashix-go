@@ -287,11 +287,14 @@ func tunFailure(stack, device, detail string) error {
 	if detail == "" {
 		detail = "mihomo did not report a TUN error"
 	}
+	label := "the configured TUN device"
+	if device != "" {
+		label = fmt.Sprintf("TUN device %q", device)
+	}
+	if isTunExistsError(detail) {
+		return fmt.Errorf("%w (stack %s): %s hit an iproute2 table or rule that already exists (often table 2022 or rule 9000 from another TUN instance); stop the other instance or pass --tun-route-table and --tun-rule-index with unused values: %s", ErrTunNotStarted, stack, label, detail)
+	}
 	if isTunBusyError(detail) {
-		label := "the configured TUN device"
-		if device != "" {
-			label = fmt.Sprintf("TUN device %q", device)
-		}
 		return fmt.Errorf("%w (stack %s): %s is already in use by another process (possibly another cx instance); stop it or pass --tun-device NAME to use a different device: %s", ErrTunNotStarted, stack, label, detail)
 	}
 	return fmt.Errorf("%w (stack %s): %s; possible causes: missing CAP_NET_ADMIN or root privileges; /dev/net/tun missing or blocked by a device cgroup/PrivateDevices; gvisor or mixed stack not compiled in (build with the with_gvisor tag)", ErrTunNotStarted, stack, detail)
@@ -302,6 +305,11 @@ func isTunBusyError(detail string) bool {
 	return strings.Contains(lower, "device or resource busy") ||
 		strings.Contains(lower, "resource busy") ||
 		strings.Contains(lower, "ebusy")
+}
+
+func isTunExistsError(detail string) bool {
+	lower := strings.ToLower(detail)
+	return strings.Contains(lower, "file exists") || strings.Contains(lower, "eexist")
 }
 
 // parseMihomoConfig applies prepared config and captures the underlying TUN
