@@ -66,14 +66,16 @@ All notable changes to this project are documented in this file.
   short `STATUS=` messages. Notifications are no-ops without `NOTIFY_SOCKET` or
   on non-Linux.
 - TUN flags `--tun-route-table` and `--tun-rule-index` map to mihomo's
-  `iproute2-table-index` and `iproute2-rule-index`. A non-default
-  `--tun-device` derives distinct indexes when neither the flags nor the
-  config supply them, so a second TUN instance avoids the 2022/9000 conflict.
-- A non-default `--tun-device` applies a deterministic IPv4 TUN /30 from
-  `198.18.0.0/16` (avoiding `198.18.0.1/30`) to mihomo's parsed config, because
-  v1.19.32 ignores YAML `tun.inet4-address`. A non-default
-  `dns.fake-ip-range` /30 is kept. IPv6 TUN addressing derives an
-  `inet6-address` /126 while an explicit non-default prefix still wins.
+  `iproute2-table-index` and `iproute2-rule-index`. The effective TUN device
+  (from `--tun-device` or config/override) derives distinct indexes when neither
+  the flags nor the config supply them, so a second TUN instance avoids the
+  2022/9000 conflict. One predicate treats empty, mihomo's `Meta`/`utunN`
+  defaults, and the packaged `cxtun` as default for both indexes and addresses.
+- A non-default device moves `dns.fake-ip-range` to a deterministic
+  `198.19.N.1/24` pool outside mihomo's default `198.18.0.0/16`; mihomo then
+  derives the TUN /30 from it, preserving the reserved gateway/first-fake-IP
+  relationship. An explicit non-default fake-IP range wins. IPv6 TUN addressing
+  derives an `inet6-address` /126 while an explicit non-default prefix wins.
 
 ### Security
 
@@ -106,7 +108,8 @@ All notable changes to this project are documented in this file.
   info nodes; groups, `DIRECT`, and `REJECT` are preserved. Placeholder servers
   (`10.255.255.255`, `0.0.0.0`, any `127.0.0.0/8`, `::1`, and empty) are also
   skipped during `--select` matching and ranking. A pattern that matches only
-  placeholders logs a warning and falls back to the best-ranked real node.
+  placeholders logs one short summary warning and falls back to the best-ranked
+  real node.
 - An explicit `--ui=false` or boolean-like `CX_UI=false` now disables every
   controller endpoint, not only the panel, so a second instance does not
   collide on the config's controller port. An explicit `--external-controller`
@@ -207,10 +210,10 @@ All notable changes to this project are documented in this file.
   `external-controller-tls`, `external-controller-unix`, and
   `external-controller-pipe` (unless `--external-controller` is explicit), so
   the panel is not served and the config controller port is not reused.
-- TUN IPv4 address derivation now updates `cfg.General.Tun.Inet4Address` after
-  mihomo parses the config instead of writing a YAML key that v1.19.32 drops.
-  Placeholder fallback warnings are folded into one summary line per selection
-  pattern.
+- TUN IPv4 derivation now moves `dns.fake-ip-range` before mihomo parses the
+  config instead of writing a YAML `tun.inet4-address` key that v1.19.32 drops.
+  Default devices, including the packaged `cxtun`, keep mihomo's default pool.
+  Placeholder fallback warnings are one short capped summary per pattern.
 - Bare protocol selection no longer ranks unrelated `TR 01`/`TR 02` names first;
   exact adapter type matches win.
 

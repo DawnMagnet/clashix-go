@@ -311,20 +311,30 @@ func (m *matcher) bestRealNode(members []C.Proxy) (string, bool) {
 }
 
 type placeholderFallback struct {
-	group        string
-	placeholders []string
-	selected     string
+	group    string
+	selected string
+}
+
+const maxPlaceholderWarningGroups = 5
+
+func formatPlaceholderFallbackWarning(pattern string, fallbacks []placeholderFallback) string {
+	node := fallbacks[0].selected
+	groups := make([]string, 0, maxPlaceholderWarningGroups+1)
+	for i, fallback := range fallbacks {
+		if i == maxPlaceholderWarningGroups {
+			groups = append(groups, fmt.Sprintf("+%d more", len(fallbacks)-maxPlaceholderWarningGroups))
+			break
+		}
+		groups = append(groups, fallback.group)
+	}
+	return fmt.Sprintf("select %q: only placeholder nodes matched in %d groups; using %q (groups: %s)", pattern, len(fallbacks), node, strings.Join(groups, ", "))
 }
 
 func warnPlaceholderFallbacks(pattern string, fallbacks []placeholderFallback) {
 	if len(fallbacks) == 0 {
 		return
 	}
-	groups := make([]string, 0, len(fallbacks))
-	for _, fallback := range fallbacks {
-		groups = append(groups, fmt.Sprintf("%s (%s) -> %s", fallback.group, strings.Join(fallback.placeholders, ", "), fallback.selected))
-	}
-	mihomolog.Warnln("node selection %q matched only placeholder nodes; falling back to the best-ranked real nodes in %s", pattern, strings.Join(groups, "; "))
+	mihomolog.Warnln("%s", formatPlaceholderFallbackWarning(pattern, fallbacks))
 }
 
 type groupInfo struct {
@@ -524,7 +534,7 @@ func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies
 			if selected, ok := spec.patternMatcher.bestRealNode(members); ok {
 				plans = append(plans, plan{group: info.name, selected: selected})
 				fallbackMatched++
-				fallbacks = append(fallbacks, placeholderFallback{group: info.name, placeholders: placeholders, selected: selected})
+				fallbacks = append(fallbacks, placeholderFallback{group: info.name, selected: selected})
 			}
 			continue
 		}
@@ -613,7 +623,7 @@ func applyToGroup(spec Spec, groupName string, proxies map[string]C.Proxy, targe
 		if !ok {
 			return fmt.Errorf("no proxy node in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, formatClosest(spec.patternMatcher, proxyMemberCandidates(members), 5))
 		}
-		warnPlaceholderFallbacks(spec.Pattern, []placeholderFallback{{group: groupName, placeholders: placeholders, selected: selected}})
+		warnPlaceholderFallbacks(spec.Pattern, []placeholderFallback{{group: groupName, selected: selected}})
 	}
 	if err := setSelected(proxy, selected); err != nil {
 		return fmt.Errorf("select %q in group %q: %w", selected, groupName, err)

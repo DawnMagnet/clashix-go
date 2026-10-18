@@ -375,10 +375,6 @@ const (
 	defaultTunRuleIndex  = 9000
 )
 
-func isDefaultTunDevice(device string) bool {
-	return config.IsDefaultTunDevice(device)
-}
-
 func tunIndexHash(value string) uint32 {
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(value))
@@ -388,6 +384,9 @@ func tunIndexHash(value string) uint32 {
 // deriveTunIndexes gives a non-default TUN device its own iproute2 table and
 // rule indexes so a second instance does not collide with mihomo's 2022/9000.
 func deriveTunIndexes(device string) (table, rule int) {
+	if !config.IsNonDefaultTunDevice(device) {
+		return defaultTunRouteTable, defaultTunRuleIndex
+	}
 	table = 1000 + int(tunIndexHash("table:"+device)%8000)
 	if table == defaultTunRouteTable {
 		table++
@@ -413,24 +412,72 @@ func tunInt(value any) int {
 	return 0
 }
 
-// applyTunAutoIndexes fills the iproute2 indexes only when a non-default
-// --tun-device was requested and neither flags nor the config supplied them.
-func applyTunAutoIndexes(opts *configOptions, cfg map[string]any) {
-	if opts == nil || cfg == nil || !tunEnabled(cfg) || isDefaultTunDevice(opts.tunDevice) {
+func tunDeviceName(tun map[string]any) string {
+	device, _ := tun["device"].(string)
+	return strings.TrimSpace(device)
+}
+
+// applyTunAutoDefaults gives a non-default effective TUN device its own
+// iproute2 table/rule indexes and fake-IP pool. The device is read from the
+// merged config, so an override.yaml device behaves like --tun-device.
+func applyTunAutoDefaults(opts *configOptions, cfg map[string]any) {
+	if opts == nil || cfg == nil || !tunEnabled(cfg) {
 		return
 	}
 	tun, ok := cfg["tun"].(map[string]any)
 	if !ok {
-		tun = map[string]any{}
-		cfg["tun"] = tun
+		return
 	}
-	table, rule := deriveTunIndexes(opts.tunDevice)
+	device := tunDeviceName(tun)
+	if !config.IsNonDefaultTunDevice(device) {
+		return
+	}
+	applyTunIndexesForDevice(opts, tun, device)
+	applyTunFakeIPRange(cfg, device)
+}
+
+// applyTunAutoIndexes is kept as the index-focused entry point used by tests.
+func applyTunAutoIndexes(opts *configOptions, cfg map[string]any) {
+	applyTunAutoDefaults(opts, cfg)
+}
+
+func applyTunIndexesForDevice(opts *configOptions, tun map[string]any, device string) {
+	table, rule := deriveTunIndexes(device)
 	if opts.tunRouteTable == 0 && tunInt(tun["iproute2-table-index"]) == 0 {
 		tun["iproute2-table-index"] = table
 	}
 	if opts.tunRuleIndex == 0 && tunInt(tun["iproute2-rule-index"]) == 0 {
 		tun["iproute2-rule-index"] = rule
 	}
+}
+
+// applyTunFakeIPRange moves a non-default device's fake-IP pool outside
+// mihomo's default 198.18.0.0/16. mihomo takes the TUN IPv4 /30 from the first
+// address of dns.fake-ip-range, and its fake-IP allocator reserves that /30's
+// gateway (.1) then starts handing out addresses at .4. A 198.19.N.1/24 pool
+// therefore keeps the same pool/TUN relationship while not overlapping the
+// default pool of another instance. An explicit non-default range wins.
+func applyTunFakeIPRange(cfg map[string]any, device string) {
+	dns, ok := cfg["dns"].(map[string]any)
+	if !ok {
+		dns = map[string]any{}
+		cfg["dns"] = dns
+	}
+	if value, exists := dns["fake-ip-range"]; exists {
+		if value != nil {
+			text, ok := value.(string)
+			if !ok {
+				return
+			}
+			if text = strings.TrimSpace(text); text != "" {
+				prefix, err := netip.ParsePrefix(text)
+				if err != nil || prefix.Masked() != config.DefaultFakeIPRange.Masked() {
+					return
+				}
+			}
+		}
+	}
+	dns["fake-ip-range"] = config.DeriveTunFakeIPRange(device).String()
 }
 
 func tunEnabled(cfg map[string]any) bool {
@@ -559,7 +606,7 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 	}
 	config.SetSelectSpecs(base, specs)
 	config.ApplyOverlay(base, overlay)
-	applyTunAutoIndexes(opts, base)
+	applyTunAutoDefaults(opts, base)
 	config.ApplyGeoXDefaults(base)
 	return base, nil
 }

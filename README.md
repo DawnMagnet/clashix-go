@@ -317,16 +317,18 @@ The flags are `--tun`, `--tun-stack system|gvisor|mixed`, `--tun-device NAME`,
 `--tun-route-table N`, `--tun-rule-index N`, and repeatable
 `--tun-exclude CIDR`; they override the config/override/`tun` section. The last
 two map to mihomo's `iproute2-table-index`/`iproute2-rule-index`. With a
-non-default `--tun-device` and no explicit indexes, `cx` derives distinct values
-(avoiding 2022/9000) so a second instance does not collide; an `EEXIST`/`file
-exists` TUN error suggests these flags. It also derives a deterministic IPv4
-TUN /30 from `198.18.0.0/16` (avoiding the default `198.18.0.1/30`) and applies
-it to mihomo's parsed config, because v1.19.32 ignores YAML
-`tun.inet4-address`. A non-default `dns.fake-ip-range` /30 is kept. When IPv6 TUN
-addressing is enabled it derives an `inet6-address` /126, keeping an explicit
-non-default prefix. On a public server, exclude private, loopback, link-local,
-multicast, broadcast, CGNAT, and metadata ranges, and keep local/cloud names out
-of fake-IP. A
+non-default effective TUN device (from `--tun-device` or config/override) and no
+explicit indexes, `cx` derives distinct values (avoiding 2022/9000) so a second
+instance does not collide; an `EEXIST`/`file exists` TUN error suggests these
+flags. Empty, mihomo's `Meta`/`utunN` defaults, and the packaged `cxtun` keep
+2022/9000 and `198.18.0.1/16`. Other devices get a deterministic
+`198.19.N.1/24` `dns.fake-ip-range` when the range is unset or still the default;
+mihomo then derives the TUN /30 from that pool, keeping the usual reserved
+gateway and first-fake-IP semantics. An explicit non-default
+`dns.fake-ip-range` wins. When IPv6 TUN addressing is enabled it derives an
+`inet6-address` /126, keeping an explicit non-default prefix. On a public server,
+exclude private, loopback, link-local, multicast, broadcast, CGNAT, and metadata
+ranges, and keep local/cloud names out of fake-IP. A
 ready-to-merge fragment with system stack, automatic routing/interface
 detection, those route exclusions, fake-IP, and metadata/local-domain filters is
 in [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml).
@@ -787,13 +789,14 @@ cx 实例占用，并建议使用 `--tun-device NAME`。重载时打印错误、
 相关参数为 `--tun`、`--tun-stack system|gvisor|mixed`、`--tun-device NAME`、
 `--tun-route-table N`、`--tun-rule-index N` 和可重复的 `--tun-exclude CIDR`；
 它们优先于配置、覆盖文件和 `tun` 段。后两者对应 mihomo 的
-`iproute2-table-index`/`iproute2-rule-index`。使用非默认 `--tun-device` 且未显式
-指定索引时，`cx` 会派生不同值（避开 2022/9000），避免第二个实例冲突；
-`EEXIST`/`file exists` TUN 错误会提示这两个参数。它还会从 `198.18.0.0/16`
-（避开默认 `198.18.0.1/30`）确定性地派生 IPv4 TUN /30，并写入 mihomo 解析后
-的配置（v1.19.32 会忽略 YAML 中的 `tun.inet4-address`）；非默认
-`dns.fake-ip-range` 的 /30 会保留。启用 IPv6 TUN 地址时再派生
-`inet6-address` /126，显式非默认前缀优先。公网服务器应排除
+`iproute2-table-index`/`iproute2-rule-index`。使用非默认的有效 TUN 设备（来自
+`--tun-device` 或配置/覆盖文件）且未显式指定索引时，`cx` 会派生不同值（避开
+2022/9000），避免第二个实例冲突；`EEXIST`/`file exists` TUN 错误会提示这两个
+参数。空设备、mihomo 的 `Meta`/`utunN` 默认名以及打包示例中的 `cxtun` 保持
+2022/9000 与 `198.18.0.1/16`。其他设备在 `dns.fake-ip-range` 未设置或仍为默认
+值时，会获得确定性的 `198.19.N.1/24`；mihomo 再从该池派生 TUN /30，保留保留
+网关与首个 fake-IP 的原有语义。显式非默认 `dns.fake-ip-range` 优先。启用
+IPv6 TUN 地址时再派生 `inet6-address` /126，显式非默认前缀优先。公网服务器应排除
 私有、loopback、链路本地、组播、广播、CGNAT 和元数据地址段，并让本地/云域名
 不进入 fake-IP。可直接合并的配置片段见
 [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml)，包含

@@ -8,22 +8,17 @@ import (
 	mihomoconfig "github.com/metacubex/mihomo/config"
 )
 
-// applyParsedTunAddresses replaces mihomo's default TUN addresses for a
-// non-default device. mihomo v1.19.32 ignores YAML tun.inet4-address and
-// always derives it from dns.fake-ip-range, so the parsed config is the first
-// place where the address can be changed. sing-tun assigns Inet4Address to the
-// interface (its connected /30 route follows that address), and also uses it
-// for Darwin auto-route subranges.
+// applyParsedTunAddresses replaces mihomo's default TUN IPv6 address for a
+// non-default device. IPv4 is handled before parsing by moving
+// dns.fake-ip-range to a separate 198.19.N.0/24 pool, which mihomo turns into
+// the TUN /30 and the fake-IP allocator's reserved gateway.
 func applyParsedTunAddresses(cfg *mihomoconfig.Config, explicitInet6 netip.Prefix) {
 	if cfg == nil || cfg.General == nil {
 		return
 	}
 	tun := &cfg.General.Tun
-	if !tun.Enable || config.IsDefaultTunDevice(tun.Device) {
+	if !tun.Enable || !config.IsNonDefaultTunDevice(tun.Device) {
 		return
-	}
-	if shouldReplaceTunInet4(tun.Inet4Address) {
-		tun.Inet4Address = []netip.Prefix{config.DeriveTunInet4(tun.Device)}
 	}
 	if cfg.General.IPv6 && shouldReplaceTunInet6(tun.Inet6Address) {
 		if explicitInet6.IsValid() && explicitInet6.Masked() != config.DefaultTunInet6.Masked() {
@@ -62,12 +57,6 @@ func explicitTunInet6(prepared []byte) netip.Prefix {
 		}
 	}
 	return netip.Prefix{}
-}
-
-// shouldReplaceTunInet4 keeps a non-default dns.fake-ip-range /30. mihomo's
-// default is 198.18.0.1/30.
-func shouldReplaceTunInet4(addresses []netip.Prefix) bool {
-	return len(addresses) == 0 || (len(addresses) == 1 && addresses[0].Masked() == config.DefaultTunInet4.Masked())
 }
 
 // shouldReplaceTunInet6 keeps an explicit non-default IPv6 prefix.

@@ -1,6 +1,7 @@
 package selection
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -222,13 +223,28 @@ func TestApplyPlaceholderFallbackWarningSummarizesGroups(t *testing.T) {
 	if err := Apply(cfg, []string{"Info"}); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if got := strings.Count(logs.String(), "matched only placeholder nodes"); got != 1 {
+	if got := strings.Count(logs.String(), "only placeholder nodes matched"); got != 1 {
 		t.Errorf("placeholder warnings = %d, want one summary: %q", got, logs.String())
 	}
 	for _, want := range []string{"Proxy A", "Proxy B", "placeholder"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("summary warning %q does not mention %q", logs.String(), want)
 		}
+	}
+}
+
+func TestPlaceholderFallbackWarningCapsGroups(t *testing.T) {
+	fallbacks := make([]placeholderFallback, 7)
+	for i := range fallbacks {
+		fallbacks[i] = placeholderFallback{
+			group:    fmt.Sprintf("G%d", i+1),
+			selected: "NODE",
+		}
+	}
+	got := formatPlaceholderFallbackWarning("PAT", fallbacks)
+	want := `select "PAT": only placeholder nodes matched in 7 groups; using "NODE" (groups: G1, G2, G3, G4, G5, +2 more)`
+	if got != want {
+		t.Errorf("warning = %q, want %q", got, want)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,6 +20,7 @@ import (
 	"github.com/DawnMagnet/clashix-go/internal/core"
 	"github.com/DawnMagnet/clashix-go/internal/hostnet"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
+	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/spf13/cobra"
 )
 
@@ -1225,6 +1227,100 @@ func TestTunIndexFlagsAndAutoDerive(t *testing.T) {
 	tun = cfg["tun"].(map[string]any)
 	if _, exists := tun["iproute2-table-index"]; exists {
 		t.Errorf("default device derived an index: %#v", tun)
+	}
+}
+
+func TestTunAutoDefaultsRespectDeviceAndFakeIPPool(t *testing.T) {
+	tests := []struct {
+		name      string
+		device    string
+		fakeRange string
+		derived   bool
+		wantFake  netip.Prefix
+	}{
+		{
+			name:     "packaged cxtun keeps defaults",
+			device:   "cxtun",
+			wantFake: netip.Prefix{},
+		},
+		{
+			name:     "utun keeps defaults",
+			device:   "utun7",
+			wantFake: netip.Prefix{},
+		},
+		{
+			name:     "cxtun2 derives indexes and pool",
+			device:   "cxtun2",
+			derived:  true,
+			wantFake: config.DeriveTunFakeIPRange("cxtun2"),
+		},
+		{
+			name:      "explicit fake-ip-range wins",
+			device:    "cxtun2",
+			fakeRange: "198.20.0.1/16",
+			derived:   true,
+			wantFake:  netip.MustParsePrefix("198.20.0.1/16"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := map[string]any{"tun": map[string]any{"enable": true, "device": test.device}}
+			if test.fakeRange != "" {
+				cfg["dns"] = map[string]any{"fake-ip-range": test.fakeRange}
+			}
+			applyTunAutoDefaults(&configOptions{}, cfg)
+			tun := cfg["tun"].(map[string]any)
+			_, hasTable := tun["iproute2-table-index"]
+			_, hasRule := tun["iproute2-rule-index"]
+			if hasTable != test.derived || hasRule != test.derived {
+				t.Errorf("derived indexes = %v/%v, want %v", hasTable, hasRule, test.derived)
+			}
+			if test.derived {
+				table, rule := deriveTunIndexes(test.device)
+				if tun["iproute2-table-index"] != table || tun["iproute2-rule-index"] != rule {
+					t.Errorf("indexes = %v/%v, want %d/%d", tun["iproute2-table-index"], tun["iproute2-rule-index"], table, rule)
+				}
+			}
+
+			data, err := config.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed, err := executor.ParseWithBytes(data)
+			if err != nil {
+				t.Fatalf("ParseWithBytes: %v", err)
+			}
+			inet4 := parsed.General.Tun.Inet4Address
+			if len(inet4) != 1 || inet4[0].Bits() != 30 {
+				t.Fatalf("TUN Inet4Address = %v, want one /30", inet4)
+			}
+			if !test.derived {
+				want := netip.PrefixFrom(config.DefaultFakeIPRange.Addr(), 30)
+				if inet4[0] != want {
+					t.Errorf("default TUN Inet4Address = %v, want %v", inet4[0], want)
+				}
+				if _, exists := cfg["dns"]; exists {
+					t.Errorf("default device changed dns: %#v", cfg["dns"])
+				}
+				return
+			}
+
+			dns := cfg["dns"].(map[string]any)
+			fake := netip.MustParsePrefix(dns["fake-ip-range"].(string))
+			if fake != test.wantFake {
+				t.Errorf("fake-ip-range = %v, want %v", fake, test.wantFake)
+			}
+			if fake.Overlaps(config.DefaultFakeIPRange) {
+				t.Errorf("derived fake-ip pool %v overlaps the default 198.18.0.0/16 pool", fake)
+			}
+			wantTun := netip.PrefixFrom(fake.Addr(), 30)
+			if inet4[0].Masked() != wantTun.Masked() {
+				t.Errorf("TUN Inet4Address = %v, want the pool's first /30 %v", inet4[0], wantTun)
+			}
+			if wantTun.Masked().Addr().Next() != fake.Addr() {
+				t.Errorf("fake-IP gateway semantics changed: pool %v, TUN %v", fake, wantTun)
+			}
+		})
 	}
 }
 
