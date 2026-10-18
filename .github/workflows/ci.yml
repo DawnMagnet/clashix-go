@@ -26,13 +26,14 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
-          cache-dependency-path: go.sum
+          cache: false
 
       - name: Cache Go build cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/go-build
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
           key: gobuild-check-linux-amd64-${{ hashFiles('go.sum') }}-${{ github.sha }}
           restore-keys: gobuild-check-linux-amd64-${{ hashFiles('go.sum') }}-
 
@@ -140,12 +141,14 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
 
       - name: Cache Go build cache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/go-build
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
           key: gobuild-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
           restore-keys: gobuild-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-
 
