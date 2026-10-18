@@ -103,17 +103,28 @@ jobs:
 
       - name: Extract release notes from CHANGELOG.md
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          header="## ${GITHUB_REF_NAME} - "
-          awk -v header="${header}" '
-            index($0, header) == 1 { capture = 1; next }
-            capture && /^## / { exit }
-            capture { print }
-          ' CHANGELOG.md > RELEASE_NOTES.md
-          if [ ! -s RELEASE_NOTES.md ]; then
-            printf 'Release %s\n' "${GITHUB_REF_NAME}" > RELEASE_NOTES.md
+          extract_notes() {
+            local version="$1"
+            awk -v header="## ${version} - " '
+              index($0, header) == 1 { capture = 1; next }
+              capture && /^## / { exit }
+              capture { print }
+            ' CHANGELOG.md
+          }
+
+          notes="$(extract_notes "${RELEASE_TAG}")"
+          if [ -z "${notes}" ] && [[ "${RELEASE_TAG}" == *-* ]]; then
+            base_version="${RELEASE_TAG%%-*}"
+            notes="$(extract_notes "${base_version}")"
           fi
+          if [ -z "${notes}" ]; then
+            notes="Release ${RELEASE_TAG}"
+          fi
+          printf '%s\n' "${notes}" > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
       - name: Create GitHub release
@@ -123,6 +134,7 @@ jobs:
           tag_name: ${{ github.ref_name }}
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           fail_on_unmatched_files: true
           files: |
             dist/cx-*
