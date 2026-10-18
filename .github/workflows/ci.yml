@@ -10,7 +10,7 @@ permissions:
 jobs:
   check:
     name: gofmt, vet, short tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -63,7 +63,7 @@ jobs:
 
   cross-build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

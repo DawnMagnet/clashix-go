@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -80,7 +80,7 @@ jobs:
   release:
     name: publish release
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -105,10 +105,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          awk -v version="${version}" '
-            $0 ~ "^## \\[" version "\\]" { capture = 1; next }
-            capture && /^## \[/ { exit }
+          header="## ${GITHUB_REF_NAME} - "
+          awk -v header="${header}" '
+            index($0, header) == 1 { capture = 1; next }
+            capture && /^## / { exit }
             capture { print }
           ' CHANGELOG.md > RELEASE_NOTES.md
           if [ ! -s RELEASE_NOTES.md ]; then
