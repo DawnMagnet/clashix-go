@@ -191,7 +191,25 @@ func freePort(t *testing.T) int {
 }
 
 func TestLogsGoToStderr(t *testing.T) {
-	if got := logrus.StandardLogger().Out; got != os.Stderr {
-		t.Errorf("mihomo log output = %T, want stderr", got)
+	filter, ok := logrus.StandardLogger().Out.(*expectedErrorFilter)
+	if !ok {
+		t.Fatalf("mihomo log output = %T, want filtered stderr", logrus.StandardLogger().Out)
+	}
+	if filter.writer != os.Stderr {
+		t.Errorf("filtered log target = %T, want stderr", filter.writer)
+	}
+}
+
+func TestExpectedErrorFilter(t *testing.T) {
+	var output bytes.Buffer
+	filter := &expectedErrorFilter{writer: &output}
+	if _, err := filter.Write([]byte("keep this line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := filter.Write([]byte(`time="now" level=error msg="External controller serve error: http: Server closed"` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "keep this line\n" {
+		t.Errorf("filtered output = %q", got)
 	}
 }

@@ -33,6 +33,10 @@ All notable changes to this project are documented in this file.
 - `cx config show` redacts additional credential fields, authorization headers,
   URL userinfo, query strings, and URL paths.
 - `cx run` disables TLS, Unix-socket, and named-pipe controller endpoints.
+- The bundled panel now embeds underscore-prefixed asset directories such as
+  `_nuxt/` and `_fonts/`.
+- The expected external-controller "Server closed" error is filtered from
+  shutdown logs.
 
 ## [0.1.0] - 2026-10-18
 

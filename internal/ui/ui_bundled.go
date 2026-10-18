@@ -9,7 +9,7 @@ import (
 
 const panelVersion = "metacubexd v1.273.1"
 
-//go:embed dist
+//go:embed all:dist
 var assets embed.FS
 
 func init() {

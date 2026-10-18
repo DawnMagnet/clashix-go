@@ -3,9 +3,11 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -57,7 +59,18 @@ var GeodataNames = []string{
 func init() {
 	// mihomo's logging defaults to stdout; the service is expected to log to
 	// stderr so stdout stays usable by child processes.
-	logrus.SetOutput(os.Stderr)
+	logrus.SetOutput(&expectedErrorFilter{writer: os.Stderr})
+}
+
+type expectedErrorFilter struct {
+	writer io.Writer
+}
+
+func (f *expectedErrorFilter) Write(data []byte) (int, error) {
+	if bytes.Contains(data, []byte("External controller serve error: http: Server closed")) {
+		return len(data), nil
+	}
+	return f.writer.Write(data)
 }
 
 // SetLogLevel sets mihomo's process-wide log level.

@@ -33,6 +33,9 @@ jobs:
       - name: Test (short)
         run: go test -short -tags "no_zerotier no_easytier no_tailscale" ./...
 
+      - name: Test with bundled panel
+        run: go test -short -tags "ui no_zerotier no_easytier no_tailscale" ./...
+
       - name: Build with bundled panel
         run: go build -tags "ui no_zerotier no_easytier no_tailscale" ./...
 
