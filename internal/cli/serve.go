@@ -39,6 +39,9 @@ func newServeCmd() *cobra.Command {
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
 			}
+			if err := opts.prepare(cmd); err != nil {
+				return err
+			}
 			if subInterval < 0 {
 				return fmt.Errorf("--sub-interval must not be negative")
 			}
@@ -47,6 +50,7 @@ func newServeCmd() *cobra.Command {
 				return err
 			}
 			configPath := config.DefaultConfigPath(stateDir)
+			opts.overrideDir = stateDir
 			overlay := opts.overlay(cmd)
 			resolvedUI, uiSet := resolveUI(cmd, ui, uiAddr)
 			if uiSet {
@@ -195,11 +199,20 @@ func newRunCmd() *cobra.Command {
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
 			}
+			if err := opts.prepare(cmd); err != nil {
+				return err
+			}
+			if dir, err := config.DefaultDir(); err == nil {
+				opts.overrideDir = dir
+			}
 
 			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stopSignals()
 
 			overlay := opts.overlay(cmd)
+			if !opts.allowLAN {
+				overlay.AllowLAN = config.BoolPtr(false)
+			}
 			resolvedUI, uiSet := resolveUI(cmd, ui, uiAddr)
 			if !cmd.Flags().Changed("ui") && !cmd.Flags().Changed("ui-addr") && cmd.Flags().Changed("controller") {
 				// An explicit --controller wins over the CX_UI / CX_UI_ADDR environment.
@@ -225,7 +238,7 @@ func newRunCmd() *cobra.Command {
 			overlay.ExternalController = config.StringPtr(controller)
 
 			mixedPort := opts.mixedPort
-			if !cmd.Flags().Changed("mixed-port") {
+			if !cmd.Flags().Changed("mixed-port") || mixedPort == 0 {
 				port, err := runnerFreePort()
 				if err != nil {
 					return err
@@ -241,6 +254,10 @@ func newRunCmd() *cobra.Command {
 			cfg, err := loadEffectiveConfig(ctx, &opts, overlay, true, cachedPath)
 			if err != nil {
 				return err
+			}
+			if !opts.allowLAN {
+				// run is temporary: it never exposes a LAN listener by default.
+				cfg["bind-address"] = "127.0.0.1"
 			}
 			// Run mode exposes only the explicitly requested main controller.
 			for _, key := range []string{"external-controller-tls", "external-controller-unix", "external-controller-pipe"} {

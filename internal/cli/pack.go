@@ -31,6 +31,12 @@ func newPackCmd() *cobra.Command {
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
 			}
+			if err := opts.prepare(cmd); err != nil {
+				return err
+			}
+			if dir, err := config.DefaultDir(); err == nil {
+				opts.overrideDir = dir
+			}
 			target := targetBinary
 			if target == "" {
 				exe, err := os.Executable()

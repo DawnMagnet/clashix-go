@@ -6,6 +6,8 @@ type Overlay struct {
 	Port               *int
 	SocksPort          *int
 	MixedPort          *int
+	RedirPort          *int
+	TProxyPort         *int
 	AllowLAN           *bool
 	Mode               *string
 	LogLevel           *string
@@ -27,6 +29,12 @@ func ApplyOverlay(cfg map[string]any, overlay Overlay) {
 	}
 	if overlay.MixedPort != nil {
 		cfg["mixed-port"] = *overlay.MixedPort
+	}
+	if overlay.RedirPort != nil {
+		cfg["redir-port"] = *overlay.RedirPort
+	}
+	if overlay.TProxyPort != nil {
+		cfg["tproxy-port"] = *overlay.TProxyPort
 	}
 	if overlay.AllowLAN != nil {
 		cfg["allow-lan"] = *overlay.AllowLAN

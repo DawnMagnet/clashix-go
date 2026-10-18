@@ -31,6 +31,22 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidateOnlyLogsWarningsAndErrors(t *testing.T) {
+	dir := t.TempDir()
+	var logs bytes.Buffer
+	oldOutput := logrus.StandardLogger().Out
+	logrus.SetOutput(&logs)
+	defer logrus.SetOutput(oldOutput)
+
+	cfg := []byte("mixed-port: 0\nlog-level: debug\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n")
+	if err := Validate(dir, cfg); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if strings.Contains(logs.String(), "level=info") {
+		t.Errorf("validation emitted info logs: %s", logs.String())
+	}
+}
+
 func TestWritePayloadGeodata(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string][]byte{

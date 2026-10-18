@@ -17,6 +17,7 @@ import (
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
+	"github.com/DawnMagnet/clashix-go/internal/selection"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub"
@@ -116,10 +117,15 @@ func Validate(dir string, cfg []byte) error {
 	}
 	constant.SetHomeDir(dir)
 
-	prepared, err := prepareConfig(cfg)
+	prepared, _, _, err := prepareConfig(cfg)
 	if err != nil {
 		return err
 	}
+	// Validation should only surface warnings and errors, regardless of the
+	// configured service log level.
+	previousLevel := mihomolog.Level()
+	mihomolog.SetLevel(mihomolog.WARNING)
+	defer mihomolog.SetLevel(previousLevel)
 	if _, err := executor.ParseWithBytes(prepared); err != nil {
 		return fmt.Errorf("validate mihomo config: %w", err)
 	}
@@ -157,8 +163,11 @@ func (m *Mihomo) startLocked(ctx context.Context, dir string, cfg []byte) error 
 	}
 	constant.SetHomeDir(dir)
 
-	prepared, err := prepareConfig(cfg)
+	prepared, parsed, specs, err := prepareConfig(cfg)
 	if err != nil {
+		return err
+	}
+	if err := selection.Validate(specs); err != nil {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -166,6 +175,10 @@ func (m *Mihomo) startLocked(ctx context.Context, dir string, cfg []byte) error 
 	}
 	if err := hub.Parse(prepared); err != nil {
 		return fmt.Errorf("start mihomo core: %w", err)
+	}
+	if err := selection.Apply(parsed, specs); err != nil {
+		_ = shutdownCore()
+		return fmt.Errorf("apply node selection: %w", err)
 	}
 	return nil
 }
@@ -188,12 +201,18 @@ func (m *Mihomo) Apply(dir string, cfg []byte) error {
 		constant.SetHomeDir(dir)
 	}
 
-	prepared, err := prepareConfig(cfg)
+	prepared, parsed, specs, err := prepareConfig(cfg)
 	if err != nil {
+		return err
+	}
+	if err := selection.Validate(specs); err != nil {
 		return err
 	}
 	if err := hub.Parse(prepared); err != nil {
 		return fmt.Errorf("apply mihomo config: %w", err)
+	}
+	if err := selection.Apply(parsed, specs); err != nil {
+		return fmt.Errorf("apply node selection: %w", err)
 	}
 	return nil
 }
@@ -207,7 +226,10 @@ func (m *Mihomo) Stop() error {
 		return nil
 	}
 	m.started = false
+	return shutdownCore()
+}
 
+func shutdownCore() error {
 	// Shutdown parses an empty configuration, which emits info logs. Keep the
 	// configured level unless it is more verbose than warning.
 	previousLevel := mihomolog.Level()
@@ -267,17 +289,19 @@ func prepareDir(dir string) error {
 	return nil
 }
 
-func prepareConfig(cfg []byte) ([]byte, error) {
+func prepareConfig(cfg []byte) ([]byte, map[string]any, []string, error) {
 	parsed, err := config.Parse(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("parse mihomo config: %w", err)
+		return nil, nil, nil, fmt.Errorf("parse mihomo config: %w", err)
 	}
+	specs := config.SelectSpecs(parsed)
+	config.StripSelect(parsed)
 	config.ApplyGeoXDefaults(parsed)
 	data, err := config.Marshal(parsed)
 	if err != nil {
-		return nil, fmt.Errorf("encode mihomo config: %w", err)
+		return nil, nil, nil, fmt.Errorf("encode mihomo config: %w", err)
 	}
-	return data, nil
+	return data, parsed, specs, nil
 }
 
 func installGeodata(dir string) error {

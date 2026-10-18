@@ -22,16 +22,20 @@ func newSubCmd() *cobra.Command {
 		Short: "Fetch subscriptions and refresh the cached configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if len(opts.subscriptions) == 0 {
-				return fmt.Errorf("at least one --sub URL is required")
-			}
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
+			}
+			if err := opts.prepare(cmd); err != nil {
+				return err
+			}
+			if len(opts.subscriptions) == 0 {
+				return fmt.Errorf("at least one subscription is required: pass --sub URL, --sub-file FILE, or set CX_SUB")
 			}
 			stateDir, err := resolveStateDir(dir)
 			if err != nil {
 				return err
 			}
+			opts.overrideDir = stateDir
 			cfg, err := loadEffectiveConfig(cmd.Context(), &opts, opts.overlay(cmd), false, "")
 			if err != nil {
 				return err

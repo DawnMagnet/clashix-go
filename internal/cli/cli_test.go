@@ -959,3 +959,297 @@ func TestResolveUIEnvAndFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestOverridePrecedenceAndDeepMerge(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "base.yaml")
+	base := `port: 1
+mode: rule
+dns:
+  enable: true
+  nameserver: [198.51.100.1]
+proxies: []
+rules:
+  - MATCH,DIRECT
+`
+	if err := os.WriteFile(configPath, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state := t.TempDir()
+	if err := os.WriteFile(filepath.Join(state, "override.yaml"), []byte("port: 2\ndns:\n  nameserver: [198.51.100.2]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	flagOverride := filepath.Join(dir, "flag.yaml")
+	if err := os.WriteFile(flagOverride, []byte("port: 3\ndns:\n  nested:\n    keep: yes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	envOverride := filepath.Join(dir, "env.yaml")
+	if err := os.WriteFile(envOverride, []byte("port: 4\ndns:\n  nameserver: [198.51.100.4]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CX_OVERRIDE", envOverride)
+
+	opts := &configOptions{
+		configPath:  configPath,
+		overrides:   []string{flagOverride},
+		overrideDir: state,
+	}
+	cfg, err := loadEffectiveConfig(context.Background(), opts, config.Overlay{Port: config.IntPtr(5)}, false, "")
+	if err != nil {
+		t.Fatalf("loadEffectiveConfig: %v", err)
+	}
+	if cfg["port"] != 5 {
+		t.Errorf("port = %v, want CLI flag 5", cfg["port"])
+	}
+	if cfg["mode"] != "rule" {
+		t.Errorf("mode = %v, want base value", cfg["mode"])
+	}
+	dns, ok := cfg["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("dns = %#v, want mapping", cfg["dns"])
+	}
+	if dns["enable"] != true {
+		t.Errorf("dns.enable = %v, want preserved base value", dns["enable"])
+	}
+	nameservers := dns["nameserver"].([]any)
+	if len(nameservers) != 1 || nameservers[0] != "198.51.100.4" {
+		t.Errorf("dns.nameserver = %#v, want environment override", nameservers)
+	}
+	nested := dns["nested"].(map[string]any)
+	if nested["keep"] != "yes" {
+		t.Errorf("dns.nested = %#v, want flag override merged", nested)
+	}
+}
+
+func TestRunSelectionPrecedence(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	writeSelectionConfig := func(t *testing.T) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		content := `mixed-port: 0
+mode: rule
+x-cx-select:
+  - from-config
+proxies: []
+proxy-groups: []
+rules:
+  - MATCH,DIRECT
+`
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	t.Run("config default", func(t *testing.T) {
+		useFakeCore(t)
+		root := NewRoot("dev")
+		root.SetArgs([]string{"run", "--config", writeSelectionConfig(t), "--", "sh", "-c", "exit 0"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		specs, _ := lastFakeCore.config[config.SelectKey].([]any)
+		if len(specs) != 1 || specs[0] != "from-config" {
+			t.Errorf("selection = %#v, want config value", lastFakeCore.config[config.SelectKey])
+		}
+	})
+
+	t.Run("environment overrides config", func(t *testing.T) {
+		useFakeCore(t)
+		t.Setenv("CX_SELECT", "env-a;Group=env-b")
+		root := NewRoot("dev")
+		root.SetArgs([]string{"run", "--config", writeSelectionConfig(t), "--", "sh", "-c", "exit 0"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		specs, _ := lastFakeCore.config[config.SelectKey].([]any)
+		if len(specs) != 2 || specs[0] != "env-a" || specs[1] != "Group=env-b" {
+			t.Errorf("selection = %#v, want environment specs", lastFakeCore.config[config.SelectKey])
+		}
+	})
+
+	t.Run("flags override environment", func(t *testing.T) {
+		useFakeCore(t)
+		t.Setenv("CX_SELECT", "env-a")
+		root := NewRoot("dev")
+		root.SetArgs([]string{
+			"run", "--config", writeSelectionConfig(t),
+			"--select", "flag-a", "--select", "Group=flag-b",
+			"--", "sh", "-c", "exit 0",
+		})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		specs, _ := lastFakeCore.config[config.SelectKey].([]any)
+		if len(specs) != 2 || specs[0] != "flag-a" || specs[1] != "Group=flag-b" {
+			t.Errorf("selection = %#v, want flags", lastFakeCore.config[config.SelectKey])
+		}
+	})
+}
+
+func TestPackEmbedsSelection(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("fake-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeConfig(t)
+	output := filepath.Join(dir, "packed")
+
+	root := NewRoot("dev")
+	root.SetArgs([]string{
+		"pack", "-o", output,
+		"--target-binary", target,
+		"--config", configPath,
+		"--select", "Proxy=hy2 us",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	packed, embedded, err := embeddedConfigFrom(output)
+	if err != nil || !embedded {
+		t.Fatalf("embeddedConfigFrom = %v, %v", embedded, err)
+	}
+	specs, _ := packed[config.SelectKey].([]any)
+	if len(specs) != 1 || specs[0] != "Proxy=hy2 us" {
+		t.Errorf("packed selection = %#v", packed[config.SelectKey])
+	}
+}
+
+func TestSubFileAndEnvironment(t *testing.T) {
+	useFakeCore(t)
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("port: 7890\nproxies:\n  - name: file-node\n    type: ss\n"))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("port: 7891\nproxies:\n  - name: env-node\n    type: ss\n"))
+	}))
+	defer second.Close()
+	t.Setenv("CX_SUB", second.URL)
+
+	dir := t.TempDir()
+	subFile := filepath.Join(dir, "subs.txt")
+	content := "# comment\n\n" + first.URL + "\n"
+	if err := os.WriteFile(subFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(subFile, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	state := t.TempDir()
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"sub", "update", "--dir", state, "--sub-file", subFile})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	cfg, err := config.Load(config.DefaultConfigPath(state))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies, ok := cfg["proxies"].([]any)
+	if !ok || len(proxies) != 2 {
+		t.Fatalf("proxies = %#v, want file and environment subscriptions", cfg["proxies"])
+	}
+	if proxies[0].(map[string]any)["name"] != "file-node" || proxies[1].(map[string]any)["name"] != "env-node" {
+		t.Errorf("proxy order = %#v", proxies)
+	}
+	if runtime.GOOS != "windows" && !strings.Contains(stderr.String(), "group or world readable") {
+		t.Errorf("sub file warning missing: %q", stderr.String())
+	}
+}
+
+func TestRunLoopbackByDefault(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := `mixed-port: 0
+mode: rule
+allow-lan: true
+bind-address: 0.0.0.0
+proxies: []
+rules:
+  - MATCH,DIRECT
+`
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("default", func(t *testing.T) {
+		useFakeCore(t)
+		root := NewRoot("dev")
+		root.SetArgs([]string{"run", "--config", configPath, "--", "sh", "-c", "exit 0"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if lastFakeCore.config["allow-lan"] != false {
+			t.Errorf("allow-lan = %v, want false", lastFakeCore.config["allow-lan"])
+		}
+		if lastFakeCore.config["bind-address"] != "127.0.0.1" {
+			t.Errorf("bind-address = %v, want 127.0.0.1", lastFakeCore.config["bind-address"])
+		}
+	})
+
+	t.Run("allow-lan flag", func(t *testing.T) {
+		useFakeCore(t)
+		root := NewRoot("dev")
+		root.SetArgs([]string{"run", "--config", configPath, "--allow-lan", "--", "sh", "-c", "exit 0"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		if lastFakeCore.config["allow-lan"] != true {
+			t.Errorf("allow-lan = %v, want true", lastFakeCore.config["allow-lan"])
+		}
+		if lastFakeCore.config["bind-address"] != "0.0.0.0" {
+			t.Errorf("bind-address = %v, want configured value", lastFakeCore.config["bind-address"])
+		}
+	})
+}
+
+func TestRunMixedPortZeroIsAutoPicked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	root := NewRoot("dev")
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--mixed-port", "0", "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if port, _ := lastFakeCore.config["mixed-port"].(int); port <= 0 {
+		t.Errorf("mixed-port = %v, want an auto-picked port", lastFakeCore.config["mixed-port"])
+	}
+}
+
+func TestPortZeroDisablesListeners(t *testing.T) {
+	root := NewRoot("dev")
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetArgs([]string{
+		"config", "show",
+		"--config", writeConfig(t),
+		"--dir", t.TempDir(),
+		"--port", "0",
+		"--socks-port", "0",
+		"--mixed-port", "0",
+		"--redir-port", "0",
+		"--tproxy-port", "0",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	for _, key := range []string{"port", "socks-port", "mixed-port", "redir-port", "tproxy-port"} {
+		if !strings.Contains(out.String(), key+": 0") {
+			t.Errorf("config show output does not contain %s: 0:\n%s", key, out.String())
+		}
+	}
+}

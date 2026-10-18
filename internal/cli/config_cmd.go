@@ -25,10 +25,14 @@ func newConfigCmd() *cobra.Command {
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
 			}
+			if err := opts.prepare(cmd); err != nil {
+				return err
+			}
 			activeDir, err := stateDir(dir)
 			if err != nil {
 				return err
 			}
+			opts.overrideDir = activeDir
 			names, embedded, err := payloadFiles()
 			if err != nil {
 				return err

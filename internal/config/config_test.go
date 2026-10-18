@@ -554,3 +554,73 @@ func TestFetchErrorSanitizesSource(t *testing.T) {
 		t.Errorf("fetch error lost its sanitized source: %s", message)
 	}
 }
+
+func TestMergeOverride(t *testing.T) {
+	base := map[string]any{
+		"port": 7890,
+		"dns": map[string]any{
+			"enable": true,
+			"nameserver": []any{
+				"198.51.100.1",
+			},
+			"nested": map[string]any{"keep": "yes"},
+		},
+		"proxies": []any{map[string]any{"name": "base-node"}},
+		"mode":    "rule",
+	}
+	override := map[string]any{
+		"port": 7891,
+		"dns": map[string]any{
+			"nameserver": []any{"203.0.113.1", "203.0.113.2"},
+			"nested":     map[string]any{"add": "yes"},
+		},
+		"proxies": []any{map[string]any{"name": "override-node"}},
+	}
+	got := MergeOverride(base, override)
+	if got["port"] != 7891 {
+		t.Errorf("port = %v, want override scalar", got["port"])
+	}
+	if got["mode"] != "rule" {
+		t.Errorf("mode = %v, want base scalar", got["mode"])
+	}
+	dns := got["dns"].(map[string]any)
+	if dns["enable"] != true {
+		t.Errorf("nested base key was lost: %#v", dns)
+	}
+	nameservers, ok := dns["nameserver"].([]any)
+	if !ok || len(nameservers) != 2 || nameservers[0] != "203.0.113.1" {
+		t.Errorf("nameserver = %#v, want replacement list", dns["nameserver"])
+	}
+	nested := dns["nested"].(map[string]any)
+	if nested["keep"] != "yes" || nested["add"] != "yes" {
+		t.Errorf("nested maps did not merge: %#v", nested)
+	}
+	proxies := got["proxies"].([]any)
+	if len(proxies) != 1 || proxies[0].(map[string]any)["name"] != "override-node" {
+		t.Errorf("proxies = %#v, want replacement list", proxies)
+	}
+	if len(base["proxies"].([]any)) != 1 {
+		t.Error("MergeOverride mutated the base document")
+	}
+}
+
+func TestSelectSpecs(t *testing.T) {
+	cfg := map[string]any{SelectKey: []any{" node-a ", "", "Group=node-b"}}
+	specs := SelectSpecs(cfg)
+	if len(specs) != 2 || specs[0] != "node-a" || specs[1] != "Group=node-b" {
+		t.Fatalf("SelectSpecs = %#v", specs)
+	}
+	SetSelectSpecs(cfg, []string{"re:^node-", "Other=node"})
+	stored := cfg[SelectKey].([]any)
+	if len(stored) != 2 || stored[0] != "re:^node-" {
+		t.Errorf("SetSelectSpecs = %#v", stored)
+	}
+	SetSelectSpecs(cfg, nil)
+	if _, exists := cfg[SelectKey]; exists {
+		t.Error("empty specs did not remove the key")
+	}
+	cfg[SelectKey] = "single"
+	if specs := SelectSpecs(cfg); len(specs) != 1 || specs[0] != "single" {
+		t.Errorf("scalar SelectSpecs = %#v", specs)
+	}
+}

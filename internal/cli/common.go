@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
+	"github.com/DawnMagnet/clashix-go/internal/selection"
 	"github.com/spf13/cobra"
 )
 
@@ -35,23 +38,37 @@ const defaultUIAddress = "127.0.0.1:9090"
 type configOptions struct {
 	configPath         string
 	subscriptions      []string
+	subFiles           []string
+	overrides          []string
+	selects            []string
 	port               int
 	socksPort          int
 	mixedPort          int
+	redirPort          int
+	tproxyPort         int
 	allowLAN           bool
 	mode               string
 	logLevel           string
 	externalController string
 	secret             string
+
+	selection    []string
+	selectionSet bool
+	overrideDir  string
 }
 
 func addConfigFlags(cmd *cobra.Command, opts *configOptions) {
 	flags := cmd.Flags()
 	flags.StringVar(&opts.configPath, "config", "", "configuration file to load")
 	flags.StringArrayVar(&opts.subscriptions, "sub", nil, "subscription URL (repeatable)")
-	flags.IntVar(&opts.port, "port", 0, "override the HTTP proxy port")
-	flags.IntVar(&opts.socksPort, "socks-port", 0, "override the SOCKS proxy port")
-	flags.IntVar(&opts.mixedPort, "mixed-port", 0, "override the mixed proxy port")
+	flags.StringArrayVar(&opts.subFiles, "sub-file", nil, "file with subscription URLs, one per line (repeatable)")
+	flags.StringArrayVar(&opts.overrides, "override", nil, "local override YAML file (repeatable, applied in order)")
+	flags.StringArrayVar(&opts.selects, "select", nil, "select a node (repeatable; PATTERN or GROUP=PATTERN)")
+	flags.IntVar(&opts.port, "port", 0, "override the HTTP proxy port (0 disables it)")
+	flags.IntVar(&opts.socksPort, "socks-port", 0, "override the SOCKS proxy port (0 disables it)")
+	flags.IntVar(&opts.mixedPort, "mixed-port", 0, "override the mixed proxy port (0 disables it)")
+	flags.IntVar(&opts.redirPort, "redir-port", 0, "override the redir proxy port (0 disables it)")
+	flags.IntVar(&opts.tproxyPort, "tproxy-port", 0, "override the tproxy port (0 disables it)")
 	flags.BoolVar(&opts.allowLAN, "allow-lan", false, "override allow-lan")
 	flags.StringVar(&opts.mode, "mode", "", "override the proxy mode")
 	flags.StringVar(&opts.logLevel, "log-level", "", "override the log level")
@@ -70,6 +87,12 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	}
 	if changed("mixed-port") {
 		overlay.MixedPort = config.IntPtr(opts.mixedPort)
+	}
+	if changed("redir-port") {
+		overlay.RedirPort = config.IntPtr(opts.redirPort)
+	}
+	if changed("tproxy-port") {
+		overlay.TProxyPort = config.IntPtr(opts.tproxyPort)
 	}
 	if changed("allow-lan") {
 		overlay.AllowLAN = config.BoolPtr(opts.allowLAN)
@@ -106,17 +129,109 @@ func (opts *configOptions) validatePorts(cmd *cobra.Command) error {
 		{"port", opts.port},
 		{"socks-port", opts.socksPort},
 		{"mixed-port", opts.mixedPort},
+		{"redir-port", opts.redirPort},
+		{"tproxy-port", opts.tproxyPort},
 	}
 	for _, port := range ports {
-		if changed(port.name) && (port.value < 1 || port.value > 65535) {
-			return fmt.Errorf("--%s must be between 1 and 65535", port.name)
+		if changed(port.name) && (port.value < 0 || port.value > 65535) {
+			return fmt.Errorf("--%s must be between 0 and 65535", port.name)
 		}
 	}
 	return nil
 }
 
+// prepare expands environment and file based sources. CLI flags win over the
+// environment; files are read only once per command.
+func (opts *configOptions) prepare(cmd *cobra.Command) error {
+	subscriptions := append([]string(nil), opts.subscriptions...)
+	for _, path := range opts.subFiles {
+		urls, mode, err := readSubscriptionFile(path)
+		if err != nil {
+			return err
+		}
+		if runtime.GOOS != "windows" && mode.Perm()&0o044 != 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: cx: subscription file %q is group or world readable; restrict it with chmod 600\n", path)
+		}
+		subscriptions = append(subscriptions, urls...)
+	}
+	if value := strings.TrimSpace(os.Getenv("CX_SUB")); value != "" {
+		subscriptions = append(subscriptions, strings.Fields(value)...)
+	}
+	opts.subscriptions = uniqueStrings(subscriptions)
+
+	if cmd.Flags().Changed("select") {
+		opts.selection = trimSpecs(opts.selects)
+		opts.selectionSet = true
+	} else if value := strings.TrimSpace(os.Getenv("CX_SELECT")); value != "" {
+		opts.selection = splitSelectionEnv(value)
+		opts.selectionSet = true
+	}
+	return nil
+}
+
+func readSubscriptionFile(path string) ([]string, os.FileMode, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("inspect subscription file %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return nil, 0, fmt.Errorf("subscription file %q is a directory", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("read subscription file %q: %w", path, err)
+	}
+	var urls []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		urls = append(urls, line)
+	}
+	return urls, info.Mode(), nil
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func trimSpecs(values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func splitSelectionEnv(value string) []string {
+	var specs []string
+	for _, part := range strings.Split(value, ";") {
+		if part = strings.TrimSpace(part); part != "" {
+			specs = append(specs, part)
+		}
+	}
+	return specs
+}
+
 // loadEffectiveConfig resolves the source order: embedded payload, explicit
-// config file, subscriptions, fallback active config, then the cx overlay.
+// config file, subscriptions, fallback active config, override files, node
+// selection, then the cx overlay.
 func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay config.Overlay, usePayload bool, fallbackPath string) (map[string]any, error) {
 	base := map[string]any{}
 	haveBase := false
@@ -175,6 +290,47 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 	if !haveBase {
 		return nil, noConfigSourceError(fallbackPath)
 	}
+
+	overrideDir := opts.overrideDir
+	if overrideDir == "" && fallbackPath != "" {
+		overrideDir = filepath.Dir(fallbackPath)
+	}
+	if overrideDir != "" {
+		override, ok, err := config.LoadOverride(filepath.Join(overrideDir, "override.yaml"), true)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			base = config.MergeOverride(base, override)
+		}
+	}
+	for _, path := range opts.overrides {
+		override, ok, err := config.LoadOverride(path, false)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			base = config.MergeOverride(base, override)
+		}
+	}
+	if path := strings.TrimSpace(os.Getenv("CX_OVERRIDE")); path != "" {
+		override, ok, err := config.LoadOverride(path, false)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			base = config.MergeOverride(base, override)
+		}
+	}
+
+	specs := opts.selection
+	if !opts.selectionSet {
+		specs = config.SelectSpecs(base)
+	}
+	if err := selection.Validate(specs); err != nil {
+		return nil, err
+	}
+	config.SetSelectSpecs(base, specs)
 	config.ApplyOverlay(base, overlay)
 	config.ApplyGeoXDefaults(base)
 	return base, nil

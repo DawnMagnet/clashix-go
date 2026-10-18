@@ -83,10 +83,52 @@ base document. Controlled keys (ports, `allow-lan`, mode, log level, controller,
 secret) are overlaid last. If none of the sources exist, `cx` exits with an
 actionable error instead of starting with an empty configuration.
 
+An override layer is deep-merged over the resolved source: `override.yaml` in
+the state directory if present, each `--override FILE` in the order given, then
+the file named by `CX_OVERRIDE`. Maps merge recursively; lists and scalars
+replace. The effective precedence is **flags > environment > override files >
+subscription/config**.
+
+A port override of `0` disables that listener: `--port 0`, `--socks-port 0`,
+`--mixed-port 0`, `--redir-port 0`, and `--tproxy-port 0`. `cx run` still needs
+a mixed port, so it picks one automatically when `--mixed-port` is omitted or
+`0`.
+
 The state directory defaults to the per-user config directory plus `cx`
 (for example `~/.config/cx` on Linux, `~/Library/Application Support/cx` on
 macOS, or `%AppData%\cx` on Windows). Files are written atomically with mode
 `0600`; the previous good config is kept as `config.yaml.last-good`.
+
+### Node selection
+
+`--select SPEC` (repeatable) works on `run`, `serve`, and `pack`. `CX_SELECT`
+takes semicolon-separated specs, and a top-level `x-cx-select` list in the local
+config or an override provides the default. Flags override `CX_SELECT`, which
+overrides `x-cx-select`. The key is never passed to mihomo.
+
+SPEC forms:
+
+- `PATTERN` targets the primary selector group: the select group used by the
+  final `MATCH` rule, otherwise the first select group in `proxy-groups`. If
+  that group only contains other groups, the first nested select group with
+  real proxies is used.
+- `GROUP=PATTERN` targets a select group whose name matches `GROUP`.
+
+A pattern starting with `re:` is a case-insensitive Go regular expression.
+Otherwise every whitespace-separated term must be a case-insensitive substring
+of the candidate name, with a fuzzy subsequence fallback. The first match in
+group order wins; a miss lists the closest candidates. Without a selection,
+placeholder/info nodes (reserved or empty servers, and names containing traffic
+expiry/reset/website/support markers) are skipped when choosing every select
+group's initial node. Groups, `DIRECT`, and `REJECT` are kept as-is.
+
+```sh
+cx run --config config.yaml --select 'hy2 us' -- curl https://example.com
+cx serve --config config.yaml --select 'Proxy=re:^🇯🇵'
+cx serve --config config.yaml --select 'Proxy=🇸🇬 Singapore'
+CX_SELECT='Proxy=hy2 us;Auto=re:tokyo' cx serve --config config.yaml
+cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
+```
 
 ### `cx serve`
 
@@ -113,6 +155,7 @@ Panel version, checksum, and MIT license are recorded in
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
+cx serve --config config.yaml --override extra.yaml --select 'Proxy=hy2 us'
 cx serve --sub 'https://example.com/subscription' --sub-interval 12h
 cx serve --dir /var/lib/cx
 cx serve --ui                       # controller + panel on 127.0.0.1:9090
@@ -149,10 +192,14 @@ launchctl kickstart -k gui/"$(id -u)"/com.dawnmagnet.cx
 Starts a temporary proxy on a free loopback mixed port, exports both lower- and
 upper-case proxy variables, runs the child in its own process group when stdin
 is not a terminal, forwards signals, and exits with the child's exit code. The
-temporary state directory is always removed.
+temporary state directory is always removed. `cx run` is loopback-only by
+default (`allow-lan: false`, `bind-address: 127.0.0.1`); pass `--allow-lan` to
+keep the configured LAN binding.
 
 ```sh
 cx run --config direct.yaml -- curl https://example.com
+cx run --config config.yaml --select 'Proxy=hy2 us' -- curl https://example.com
+cx run --config config.yaml --override extra.yaml -- curl https://example.com
 cx run --sub 'https://example.com/subscription' -- git clone https://example.com/repo.git
 cx run --log-level info --config direct.yaml -- bash
 cx run --ui --config direct.yaml -- curl http://127.0.0.1:9090/ui/
@@ -170,12 +217,18 @@ controller and the bundled panel; `--ui-addr` implies `--ui` and defaults to
 ```sh
 cx sub update --dir ~/.config/cx --sub 'https://example.com/subscription'
 cx sub update --dir ~/.config/cx --sub URL1 --sub URL2
+CX_SUB='URL1 URL2' cx sub update --dir ~/.config/cx
+printf '%s\n' URL1 URL2 > subs.txt
+cx sub update --dir ~/.config/cx --sub-file subs.txt
 ```
 
-Subscriptions are fetched with proxy environment variables ignored, a 30-second
-timeout, a 16 MiB size cap, user agent `clash-verge/v2.4.3`, and a base64
-fallback. `sub update` validates the merged config with mihomo before replacing
-the active file.
+`CX_SUB` accepts whitespace- or newline-separated URLs. `--sub-file FILE` reads
+one URL per line, ignores blank lines and lines starting with `#`, and warns on
+Unix when the file is group or world readable. Subscriptions are fetched with
+proxy environment variables ignored, a 30-second timeout, a 16 MiB size cap,
+user agent `clash-verge/v2.4.3`, and a base64 fallback. `sub update` validates
+the merged config with mihomo (warning+ logs only) before replacing the active
+file.
 
 ### Packing preconfigured builds
 
@@ -183,16 +236,19 @@ the active file.
 cx pack -o cx-private \
   --config config.yaml \
   --geodata ./geodata \
-  --target-binary ./cx
+  --target-binary ./cx \
+  --select 'Proxy=hy2 us'
 
 cx-private run -- curl https://example.com
 ```
 
 `--geodata` picks the known files `geoip.metadb`, `geoip.dat`, `geosite.dat`,
 `GeoLite2-ASN.mmdb`, and `ASN.mmdb` from the directory. Subscriptions are
-resolved at pack time; subscription URLs are never embedded. The resulting
-binary is written with mode `0700` and uses its embedded config and geodata with
-no flags.
+resolved at pack time; subscription URLs are never embedded. Selections passed
+to `pack` are stored in the embedded config as `x-cx-select`, so the packed
+binary applies them by default; runtime `--select`/`CX_SELECT` overrides them.
+The resulting binary is written with mode `0700` and uses its embedded config
+and geodata with no flags.
 
 `cx pack` strips the controller `secret` from the embedded config and prints a
 note. A later `cx serve` from that binary generates a fresh secret at startup if
@@ -304,9 +360,46 @@ mieru、SSH、AmneziaWG、Wazero 的排除 tag，因此这些较重依赖仍会�
 mode、日志等级、控制器、secret）最后覆盖。如果以上来源都不存在，`cx` 会立即
 报错并给出可操作的提示，而不会用空配置启动。
 
+覆盖层会深合并到已解析的配置之上：状态目录中的 `override.yaml`（若存在）、
+按顺序给出的每个 `--override FILE`，最后是 `CX_OVERRIDE` 指定的文件。映射递归
+合并，列表与标量直接替换。有效优先级为 **命令行参数 > 环境变量 > 覆盖文件 >
+订阅/配置**。
+
+端口覆盖值 `0` 会禁用对应监听：`--port 0`、`--socks-port 0`、`--mixed-port 0`、
+`--redir-port 0`、`--tproxy-port 0`。`cx run` 仍需要混合端口，因此在未指定
+`--mixed-port` 或指定为 `0` 时会自动选择。
+
 状态目录默认为用户配置目录下的 `cx`（Linux 通常是 `~/.config/cx`，macOS 是
 `~/Library/Application Support/cx`，Windows 是 `%AppData%\cx`）。配置以 `0600`
 权限原子写入，上一份有效配置保留为 `config.yaml.last-good`。
+
+### 节点选择
+
+`--select SPEC`（可重复）适用于 `run`、`serve` 和 `pack`。`CX_SELECT` 使用分号
+分隔多个 SPEC；本地配置或覆盖文件中的顶层 `x-cx-select` 列表提供默认值。
+命令行参数覆盖 `CX_SELECT`，`CX_SELECT` 覆盖 `x-cx-select`。该键不会传给
+mihomo。
+
+SPEC 形式：
+
+- `PATTERN`：作用于主选择组——最终 `MATCH` 规则引用的选择组；若它不存在或不是
+  选择组，则取 `proxy-groups` 中第一个选择组。如果该组成员都是组，则使用第一个
+  包含真实代理的嵌套选择组。
+- `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。
+
+以 `re:` 开头的模式是不区分大小写的 Go 正则；否则按空白拆分，每个词都必须
+不区分大小写地作为候选名称的子串，若都不匹配再回退到模糊子序列匹配。按组内
+顺序取第一个匹配项；无匹配时会列出最接近的候选。未指定选择时，为每个选择组
+选择初始节点会跳过占位/信息节点（保留地址或空地址，以及名称含流量到期、重置、
+官网、客服等标记的节点）。组、`DIRECT` 和 `REJECT` 保持原样。
+
+```sh
+cx run --config config.yaml --select 'hy2 us' -- curl https://example.com
+cx serve --config config.yaml --select 'Proxy=re:^🇯🇵'
+cx serve --config config.yaml --select 'Proxy=🇸🇬 Singapore'
+CX_SELECT='Proxy=hy2 us;Auto=re:tokyo' cx serve --config config.yaml
+cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
+```
 
 ### `cx serve`
 
@@ -328,6 +421,7 @@ stderr 打印一次，方便登录。配置中的非空 `secret`、`CX_SECRET` �
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
+cx serve --config config.yaml --override extra.yaml --select 'Proxy=hy2 us'
 cx serve --sub 'https://example.com/subscription' --sub-interval 12h
 cx serve --dir /var/lib/cx
 cx serve --ui                       # 控制器 + 面板，127.0.0.1:9090
@@ -363,10 +457,14 @@ launchctl kickstart -k gui/"$(id -u)"/com.dawnmagnet.cx
 
 在空闲 loopback 混合端口上启动临时代理，导出大小写两套代理环境变量，运行子
 进程，转发信号，并以子进程退出码退出。stdin 不是终端时子进程使用独立进程组。
-临时状态目录在所有退出路径上都会被删除。
+临时状态目录在所有退出路径上都会被删除。`cx run` 默认仅绑定 loopback
+（`allow-lan: false`、`bind-address: 127.0.0.1`）；传入 `--allow-lan` 才保留配置
+中的局域网绑定。
 
 ```sh
 cx run --config direct.yaml -- curl https://example.com
+cx run --config config.yaml --select 'Proxy=hy2 us' -- curl https://example.com
+cx run --config config.yaml --override extra.yaml -- curl https://example.com
 cx run --sub 'https://example.com/subscription' -- git clone https://example.com/repo.git
 cx run --log-level info --config direct.yaml -- bash
 cx run --ui --config direct.yaml -- curl http://127.0.0.1:9090/ui/
@@ -384,11 +482,16 @@ cx run --ui --ui-addr 127.0.0.1:9090 --config direct.yaml -- curl https://exampl
 ```sh
 cx sub update --dir ~/.config/cx --sub 'https://example.com/subscription'
 cx sub update --dir ~/.config/cx --sub URL1 --sub URL2
+CX_SUB='URL1 URL2' cx sub update --dir ~/.config/cx
+printf '%s\n' URL1 URL2 > subs.txt
+cx sub update --dir ~/.config/cx --sub-file subs.txt
 ```
 
-订阅请求忽略代理环境变量，超时 30 秒，大小上限 16 MiB，User-Agent 为
+`CX_SUB` 接受以空白或换行分隔的 URL。`--sub-file FILE` 每行一个 URL，忽略空行
+和以 `#` 开头的行；Unix 下若文件可被组或其他用户读取会给出警告。订阅请求忽略
+代理环境变量，超时 30 秒，大小上限 16 MiB，User-Agent 为
 `clash-verge/v2.4.3`，并支持 base64 回退。`sub update` 会先用 mihomo 校验合并
-后的配置，再替换活动配置。
+后的配置（仅输出 warning 及以上日志），再替换活动配置。
 
 ### 打包预配置二进制
 
@@ -396,15 +499,17 @@ cx sub update --dir ~/.config/cx --sub URL1 --sub URL2
 cx pack -o cx-private \
   --config config.yaml \
   --geodata ./geodata \
-  --target-binary ./cx
+  --target-binary ./cx \
+  --select 'Proxy=hy2 us'
 
 cx-private run -- curl https://example.com
 ```
 
 `--geodata` 只从目录中挑选已知文件：`geoip.metadb`、`geoip.dat`、
 `geosite.dat`、`GeoLite2-ASN.mmdb`、`ASN.mmdb`。订阅在打包时解析，订阅 URL
-不会写入二进制。产物以 `0700` 权限写入，无需任何参数即可使用内嵌配置和
-geodata 执行 `run`。
+不会写入二进制。传给 `pack` 的选择项会以 `x-cx-select` 存入内嵌配置，打包后的
+二进制默认应用；运行时的 `--select`/`CX_SELECT` 会覆盖它。产物以 `0700` 权限
+写入，无需任何参数即可使用内嵌配置和 geodata 执行 `run`。
 
 `cx pack` 会从内嵌配置中删除控制器 `secret` 并打印提示。之后用该二进制运行
 `cx serve` 时，如果启用了外部控制器，会在启动时生成新的随机 secret。

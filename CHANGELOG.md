@@ -2,7 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## v0.1.1 - Unreleased
+
+### Added
+
+- Node selection with `--select SPEC` on `run`, `serve`, and `pack`,
+  semicolon-separated `CX_SELECT`, and the local `x-cx-select` config key.
+  Specs support the primary selector group, `GROUP=PATTERN`, case-insensitive
+  Go regexps, term/subsequence matching, deterministic first-match selection,
+  and closest-candidate errors. The key is stripped before mihomo starts.
+- Override files deep-merged over subscription/config sources: state-directory
+  `override.yaml`, repeatable `--override FILE`, and `CX_OVERRIDE`. Maps merge
+  recursively while lists and scalars replace.
+- `CX_SUB` and repeatable `--sub-file FILE` subscription sources, with comment
+  and blank-line handling and a Unix permissions warning.
+- Selection is embedded in packed binaries as `x-cx-select`; runtime flags and
+  environment override it.
+
+### Changed
+
+- Ports `0` now disable listeners for `--port`, `--socks-port`, `--mixed-port`,
+  `--redir-port`, and `--tproxy-port`; `cx run` auto-picks a mixed port when it
+  is omitted or `0`.
+- `cx run` binds loopback-only by default (`allow-lan: false`,
+  `bind-address: 127.0.0.1`) unless `--allow-lan` is passed.
+- Without an explicit selection, initial select-group nodes skip placeholder and
+  info nodes; groups, `DIRECT`, and `REJECT` are preserved.
+- `sub update` and config validation emit warning+ mihomo logs only.
+
+### Documentation
+
+- README (English and Chinese) documents selection, override precedence, new
+  subscription sources, loopback-only `run`, and port `0` behavior.
 
 ## v0.1.0 - 2026-10-18
 
