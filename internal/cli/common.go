@@ -69,7 +69,7 @@ func addConfigFlags(cmd *cobra.Command, opts *configOptions) {
 	flags.IntVar(&opts.mixedPort, "mixed-port", 0, "override the mixed proxy port (0 disables it)")
 	flags.IntVar(&opts.redirPort, "redir-port", 0, "override the redir proxy port (0 disables it)")
 	flags.IntVar(&opts.tproxyPort, "tproxy-port", 0, "override the tproxy port (0 disables it)")
-	flags.BoolVar(&opts.allowLAN, "allow-lan", false, "override allow-lan")
+	flags.BoolVar(&opts.allowLAN, "allow-lan", false, "override allow-lan (--allow-lan=false forces it off)")
 	flags.StringVar(&opts.mode, "mode", "", "override the proxy mode")
 	flags.StringVar(&opts.logLevel, "log-level", "", "override the log level")
 	flags.StringVar(&opts.externalController, "external-controller", "", "override the controller address")
@@ -116,7 +116,7 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 
 func addUIFlag(cmd *cobra.Command, enabled *bool, address *string) {
 	flags := cmd.Flags()
-	flags.BoolVar(enabled, "ui", false, "enable the controller and web panel")
+	flags.BoolVar(enabled, "ui", false, "enable the controller and web panel (--ui=false disables it)")
 	flags.StringVar(address, "ui-addr", defaultUIAddress, "controller and web panel address (implies --ui)")
 }
 

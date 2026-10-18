@@ -162,17 +162,34 @@ func TestRedact(t *testing.T) {
 				"name":           "node",
 				"username":       "alice",
 				"password":       "hunter2",
+				"uuid":           "proxy-uuid",
+				"private-key":    "private-secret",
 				"auth-str":       "hysteria-secret",
 				"pre-shared-key": "wireguard-secret",
+				"obfs-password":  "obfs-secret",
 				"nested":         map[string]any{"token": "abc", "safe": "value"},
 			},
 		},
 		"proxy-providers": map[string]any{
 			"remote": map[string]any{
-				"url": "https://provider-user:provider-pass@example.test/private/token?token=query-secret",
+				"url": "https://provider-user:provider-pass@example.test/sub?foo=bar&token=query-secret",
 				"headers": map[string]any{
 					"Authorization": "Bearer header-secret",
 				},
+			},
+		},
+		"dns": map[string]any{
+			"nameserver": []any{
+				"https://dns.example.test/dns-query?token=doh-secret",
+				"https://dns.example.test/plain-query",
+			},
+		},
+		"geox-url": map[string]any{
+			"geoip": "https://cdn.example.test/geodata/geoip.dat?mirror=1",
+		},
+		"rule-providers": map[string]any{
+			"rules": map[string]any{
+				"url": "https://rules.example.test/rules.yaml?token=rule-secret&format=yaml",
 			},
 		},
 	}
@@ -181,11 +198,13 @@ func TestRedact(t *testing.T) {
 		t.Errorf("secret = %v, want %s", got["secret"], Redacted)
 	}
 	proxy := got["proxies"].([]any)[0].(map[string]any)
-	if proxy["username"] != Redacted || proxy["password"] != Redacted {
-		t.Errorf("proxy credentials were not redacted: %#v", proxy)
+	if proxy["username"] != "alice" {
+		t.Errorf("username = %v, want it preserved", proxy["username"])
 	}
-	if proxy["auth-str"] != Redacted || proxy["pre-shared-key"] != Redacted {
-		t.Errorf("proxy credential fields were not redacted: %#v", proxy)
+	for _, key := range []string{"password", "uuid", "private-key", "auth-str", "pre-shared-key", "obfs-password"} {
+		if proxy[key] != Redacted {
+			t.Errorf("%s = %v, want %s", key, proxy[key], Redacted)
+		}
 	}
 	nested := proxy["nested"].(map[string]any)
 	if nested["token"] != Redacted || nested["safe"] != "value" {
@@ -193,17 +212,34 @@ func TestRedact(t *testing.T) {
 	}
 	provider := got["proxy-providers"].(map[string]any)["remote"].(map[string]any)
 	providerURL := provider["url"].(string)
-	for _, secret := range []string{"provider-user", "provider-pass", "private", "token", "query-secret"} {
+	for _, secret := range []string{"provider-user", "provider-pass", "foo=bar", "query-secret"} {
 		if strings.Contains(providerURL, secret) {
-			t.Errorf("provider URL leaked %q: %s", secret, providerURL)
+			t.Errorf("subscription URL leaked %q: %s", secret, providerURL)
 		}
 	}
-	if !strings.Contains(providerURL, "example.test") {
-		t.Errorf("provider URL lost its host: %s", providerURL)
+	if !strings.Contains(providerURL, "example.test/sub") {
+		t.Errorf("subscription URL lost its host or path: %s", providerURL)
 	}
 	headers := provider["headers"].(map[string]any)
 	if headers["Authorization"] != Redacted {
 		t.Errorf("authorization header was not redacted: %#v", headers)
+	}
+
+	dns := got["dns"].(map[string]any)["nameserver"].([]any)
+	doh := dns[0].(string)
+	if !strings.Contains(doh, "dns.example.test/dns-query") || strings.Contains(doh, "doh-secret") {
+		t.Errorf("DoH URL redaction = %s", doh)
+	}
+	if dns[1] != "https://dns.example.test/plain-query" {
+		t.Errorf("DoH URL without secrets = %s", dns[1])
+	}
+	geoip := got["geox-url"].(map[string]any)["geoip"].(string)
+	if geoip != "https://cdn.example.test/geodata/geoip.dat?mirror=1" {
+		t.Errorf("geox-url = %s, want it preserved", geoip)
+	}
+	ruleURL := got["rule-providers"].(map[string]any)["rules"].(map[string]any)["url"].(string)
+	if !strings.Contains(ruleURL, "rules.example.test/rules.yaml") || !strings.Contains(ruleURL, "format=yaml") || strings.Contains(ruleURL, "rule-secret") {
+		t.Errorf("rule-provider URL redaction = %s", ruleURL)
 	}
 	if cfg["secret"] != "controller-secret" {
 		t.Error("Redact mutated the input config")

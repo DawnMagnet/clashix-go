@@ -69,7 +69,8 @@ type expectedErrorFilter struct {
 }
 
 func (f *expectedErrorFilter) Write(data []byte) (int, error) {
-	if bytes.Contains(data, []byte("External controller serve error: http: Server closed")) {
+	if bytes.Contains(data, []byte("External controller serve error: http: Server closed")) ||
+		bytes.Contains(data, []byte("Mihomo shutting down")) {
 		return len(data), nil
 	}
 	return f.writer.Write(data)
@@ -231,7 +232,10 @@ func (m *Mihomo) Stop() error {
 
 func shutdownCore() error {
 	// Shutdown parses an empty configuration, which emits info logs. Keep the
-	// configured level unless it is more verbose than warning.
+	// configured level unless it is more verbose than warning. Reparse
+	// optimization is intentionally skipped; the empty config keeps shutdown on
+	// mihomo's normal reload path.
+
 	previousLevel := mihomolog.Level()
 	shutdownLevel := mihomolog.WARNING
 	if previousLevel > shutdownLevel {

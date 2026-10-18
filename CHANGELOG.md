@@ -9,9 +9,10 @@ All notable changes to this project are documented in this file.
 - Node selection with `--select SPEC` on `run`, `serve`, and `pack`,
   semicolon-separated `CX_SELECT`, and the local `x-cx-select` config key.
   Specs support bare patterns across select groups, precise `GROUP=PATTERN`,
-  case-insensitive Go regexps, term/subsequence matching, deterministic
-  first-match selection, and closest-candidate errors. The key is stripped
-  before mihomo starts.
+  case-insensitive Go regexps, region aliases (for example 日本/japan/jp and
+  美国/usa/us expand to their codes and flags), and `type:PROTO` selectors such
+  as `type:anytls`, `type:hysteria2`, and `type:hy2`. The key is stripped before
+  mihomo starts.
 - Override files deep-merged over subscription/config sources: state-directory
   `override.yaml`, repeatable `--override FILE`, and `CX_OVERRIDE`. Maps merge
   recursively while lists and scalars replace.
@@ -19,13 +20,25 @@ All notable changes to this project are documented in this file.
   and blank-line handling and a Unix permissions warning.
 - Selection is embedded in packed binaries as `x-cx-select`; runtime flags and
   environment override it.
+- `cx version` falls back to Go build information when the release version is
+  not injected: the module version when available, otherwise the 12-character
+  VCS revision with `-dirty` when the worktree was modified.
+- The systemd unit now has `ExecReload=/bin/kill -HUP $MAINPID`,
+  `EnvironmentFile=-/etc/cx/cx.env`, `LimitNOFILE=1048576`, and proxy-only
+  hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
+  `PrivateTmp`). The launchd plist documents the reload command and the
+  `KeepAlive`/`ThrottleInterval` equivalents.
 
 ### Changed
 
 - Bare `PATTERN` selection applies to every select group that directly contains
-  a matching member, sets groups containing the primary group to it, and leaves
-  other groups unchanged. Precise `GROUP=PATTERN` specs run afterwards and win;
-  bare selection only errors when no group contains a match.
+  a matching member and sets groups containing the final `MATCH` selector to it;
+  other groups are left unchanged. Precise `GROUP=PATTERN` specs run afterwards
+  and win. Bare selection only errors when no group contains a match, and then
+  lists actual proxy nodes ranked by matching words; group names appear only in
+  `GROUP=PATTERN` errors.
+- Short region codes match whole tokens, so `us` does not match `plus`, and the
+  fuzzy subsequence fallback was removed (it matched `trojan` to `🇹🇷TR 01`).
 - Ports `0` now disable listeners for `--port`, `--socks-port`, `--mixed-port`,
   `--redir-port`, and `--tproxy-port`; `cx run` auto-picks a mixed port when it
   is omitted or `0`.
@@ -33,12 +46,40 @@ All notable changes to this project are documented in this file.
   `bind-address: 127.0.0.1`) unless `--allow-lan` is passed.
 - Without an explicit selection, initial select-group nodes skip placeholder and
   info nodes; groups, `DIRECT`, and `REJECT` are preserved.
+- `cx serve` registers SIGHUP/SIGTERM/SIGINT handlers before loading or fetching
+  configuration. A SIGHUP during startup is queued and coalesced into one reload
+  after the core is ready; SIGTERM/SIGINT cancel an in-flight fetch and exit
+  cleanly.
+- `cx config show` redacts only credentials and secret-bearing URL parts:
+  password, uuid, private-key, pre-shared-key, auth/auth-str, token-like keys,
+  secret, obfs-password, URL userinfo, and secret-looking query parameters.
+  Proxy-provider and subscription URLs hide their whole query string. DoH paths,
+  credential-free geox URLs, and rule-provider URLs without secret parameters
+  are no longer over-redacted.
+- Boolean flag help documents explicit forms such as `--allow-lan=false` and
+  `--ui=false`.
+- Normal `run`/`serve` shutdown suppresses mihomo's "Mihomo shutting down"
+  warning. A shutdown reparse optimization was deliberately skipped.
 - `sub update` and config validation emit warning+ mihomo logs only.
 
 ### Documentation
 
-- README (English and Chinese) documents selection, override precedence, new
-  subscription sources, loopback-only `run`, and port `0` behavior.
+- README (English and Chinese) documents region/type selection, the removal of
+  fuzzy matching, the narrowed redaction rules, and version fallback.
+- Added a hardened public-server example: `override.yaml` with `allow-lan:
+  false` and unused ports `0`, controller/panel on `127.0.0.1:9090` with a
+  secret, and `--sub-file`/`CX_SUB` supplied through `/etc/cx/cx.env`. The docs
+  warn that subscriptions may set `allow-lan: true` and must not be trusted.
+
+### Fixed
+
+- SIGHUP received during `cx serve` startup no longer kills the process through
+  Go's default signal action; systemd now sees a live service and can apply the
+  queued reload.
+- Node-selection errors no longer say "primary group X"; they describe the
+  all-select-groups behavior and list real proxy nodes instead of groups,
+  `DIRECT`, or `REJECT`.
+- Launchd and systemd reload behavior is documented and wired consistently.
 
 ## v0.1.0 - 2026-10-18
 

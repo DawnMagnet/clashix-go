@@ -109,19 +109,26 @@ overrides `x-cx-select`. The key is never passed to mihomo.
 SPEC forms:
 
 - `PATTERN` applies to every select group that directly contains a matching
-  proxy, choosing that group's first match. Groups without a matching direct
-  member are left unchanged, except that a group containing the primary
-  selector group as a member is set to the primary group. The primary selector
-  group is the select group used by the final `MATCH` rule, otherwise the first
-  select group in `proxy-groups`. A bare pattern errors only when no group
-  contains a match, listing closest candidates from the primary group.
+  proxy, choosing that group's first match. Error messages describe this
+  all-groups behavior and list the closest real proxy nodes, never groups,
+  `DIRECT`, or `REJECT`. Groups without a matching direct member are left
+  unchanged, except that a group containing the final `MATCH` selector is set
+  to that selector.
 - `GROUP=PATTERN` targets a select group whose name matches `GROUP`. Precise
-  group specs run after bare patterns and win.
+  group specs run after bare patterns and win, and only these errors name the
+  selected group.
 
 A pattern starting with `re:` is a case-insensitive Go regular expression.
-Otherwise every whitespace-separated term must be a case-insensitive substring
-of the candidate name, with a fuzzy subsequence fallback. Within each group,
-the first matching member in member order wins. Without a selection,
+Otherwise every whitespace-separated word must match the candidate name with a
+case-insensitive substring, except two-letter region codes, which must match a
+whole token so `us` does not match `plus`. Region words expand to their flag and
+code aliases: 日本/japan/jp → JP 🇯🇵, 香港/hongkong/hk → HK 🇭🇰,
+台湾/taiwan/tw → TW 🇹🇼, 新加坡/singapore/sg → SG 🇸🇬, 美国/usa/us → US 🇺🇸,
+韩国/korea/kr → KR 🇰🇷, 英国/uk/gb → UK/GB 🇬🇧, 德国/germany/de → DE 🇩🇪,
+and 加拿大/canada/ca → CA 🇨🇦. `type:PROTO` matches the proxy's type and can be
+combined with words, for example `type:anytls`, `type:hysteria2`, or
+`type:hy2 hk`. There is no fuzzy subsequence fallback. Within each group, the
+first matching member in member order wins. Without a selection,
 placeholder/info nodes (reserved or empty servers, and names containing traffic
 expiry/reset/website/support markers) are skipped when choosing every select
 group's initial node. Groups, `DIRECT`, and `REJECT` are kept as-is.
@@ -130,6 +137,7 @@ group's initial node. Groups, `DIRECT`, and `REJECT` are kept as-is.
 cx run --config config.yaml --select 'hy2 us' -- curl https://example.com
 cx serve --config config.yaml --select 'Proxy=re:^🇯🇵'
 cx serve --config config.yaml --select 'Proxy=🇸🇬 Singapore'
+cx serve --config config.yaml --select 'type:anytls hk'
 CX_SELECT='Proxy=hy2 us;Auto=re:tokyo' cx serve --config config.yaml
 cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
 ```
@@ -178,8 +186,54 @@ sudo systemctl enable --now cx
 
 The packaged unit uses `/var/lib/cx` as its state directory. Seed it first with
 `cx sub update --dir /var/lib/cx --sub URL` (run as root), or copy a config to
-`/var/lib/cx/config.yaml`. TUN mode may need root; for proxy-only operation
-uncomment `User=`/`Group=`.
+`/var/lib/cx/config.yaml`. The unit sets `ExecReload=/bin/kill -HUP $MAINPID`,
+so `sudo systemctl reload cx` applies a new configuration without a restart.
+TUN mode may need root; for proxy-only operation uncomment `User=`/`Group=`.
+
+#### Hardened public-server example
+
+Subscriptions are untrusted input: a subscription may set `allow-lan: true` or
+enable additional listeners. Override files are applied after subscriptions, so
+pin the exposed surface explicitly instead of trusting the subscription.
+
+```sh
+sudo install -d -m 0700 /var/lib/cx /etc/cx
+sudo tee /var/lib/cx/override.yaml >/dev/null <<'EOF'
+allow-lan: false
+bind-address: 127.0.0.1
+port: 0
+socks-port: 0
+redir-port: 0
+tproxy-port: 0
+mixed-port: 7890
+mode: rule
+EOF
+sudo tee /etc/cx/cx.env >/dev/null <<'EOF'
+CX_SUB=https://example.com/subscription
+CX_SECRET=choose-a-long-random-secret
+EOF
+sudo chmod 0600 /etc/cx/cx.env
+```
+
+Then enable the loopback-only panel and controller with a systemd drop-in:
+
+```sh
+sudo systemctl edit cx
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/cx serve --dir /var/lib/cx --ui-addr 127.0.0.1:9090
+```
+
+The secret comes from `CX_SECRET` in `/etc/cx/cx.env` (or use `--secret`). To
+keep subscription URLs out of the unit, put one URL per line in
+`/etc/cx/subscriptions` (mode `0600`) and add `--sub-file /etc/cx/subscriptions`
+to `ExecStart` instead of setting `CX_SUB`. `--ui-addr` only binds the panel and
+controller; keep it on loopback and access it through an SSH tunnel or a
+reverse proxy with TLS and authentication. Do not expose the controller
+directly to the internet.
 
 A launchd agent is provided at
 [`packaging/launchd/com.dawnmagnet.cx.plist`](packaging/launchd/com.dawnmagnet.cx.plist):
@@ -189,7 +243,13 @@ install -m 0644 packaging/launchd/com.dawnmagnet.cx.plist \
   ~/Library/LaunchAgents/com.dawnmagnet.cx.plist
 launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.dawnmagnet.cx.plist
 launchctl kickstart -k gui/"$(id -u)"/com.dawnmagnet.cx
+launchctl kill SIGHUP gui/"$(id -u)"/com.dawnmagnet.cx   # reload
 ```
+
+launchd has no `ExecReload` or `EnvironmentFile`; use `launchctl kill SIGHUP`
+and `EnvironmentVariables` or a wrapper script. `KeepAlive` with
+`SuccessfulExit=false` is the `Restart=on-failure` equivalent, and
+`ThrottleInterval` is the `RestartSec` equivalent.
 
 ### `cx run`
 
@@ -266,10 +326,18 @@ the external controller is enabled.
 ### Inspecting config and payloads
 
 ```sh
-cx config show                 # YAML on stdout, secrets redacted
+cx config show                 # YAML on stdout, credentials and secret URL parameters redacted
 cx config show --config FILE   # report payload status on stderr
 cx version                     # version + embedded payload file list
 ```
+
+`config show` redacts password/private-key/auth/token/secret fields, URL
+userinfo, and secret-looking query parameters (`token`, `key`, `secret`,
+`password`, `auth`, `sig`). All query parameters on proxy-provider and
+subscription URLs are hidden. DoH paths, geox URLs without credentials, and
+rule-provider URLs without secret parameters remain readable. When no release
+version is injected, `cx version` falls back to module version or the Git
+revision (12 characters, with `-dirty` when modified).
 
 ### Tests and release builds
 
@@ -387,23 +455,29 @@ mihomo。
 SPEC 形式：
 
 - `PATTERN`：作用于所有直接包含匹配代理的选择组，并为每个组选择组内第一个匹配
-  项。没有匹配直接成员的组保持不变；但如果该组把主选择组作为成员，则把该组设置
-  为主选择组。主选择组是最终 `MATCH` 规则引用的选择组；若它不存在或不是选择组，
-  则取 `proxy-groups` 中第一个选择组。裸模式只有在所有组都没有匹配时才报错，并
-  列出主选择组中最接近的候选。
+  项。错误信息会说明这一“所有组”行为，并列出真正最接近的代理节点，不会列出组、
+  `DIRECT` 或 `REJECT`。没有匹配直接成员的组保持不变；但如果该组把最终 `MATCH`
+  规则引用的选择组作为成员，则把该组设置为该选择组。
 - `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。精确组规则在裸模式之后
-  执行，并且优先。
+  执行，并且优先；只有这类错误会点名具体选择组。
 
 以 `re:` 开头的模式是不区分大小写的 Go 正则；否则按空白拆分，每个词都必须
-不区分大小写地作为候选名称的子串，若都不匹配再回退到模糊子序列匹配。每个组内
-按成员顺序取第一个匹配项。未指定选择时，为每个选择组选择初始节点会跳过占位/信息
-节点（保留地址或空地址，以及名称含流量到期、重置、官网、客服等标记的节点）。
+不区分大小写地匹配候选名称的子串；但两字母地区代码必须作为完整 token 匹配，因此
+`us` 不会匹配 `plus`。地区词会展开为对应旗帜和代码别名：
+日本/japan/jp → JP 🇯🇵，香港/hongkong/hk → HK 🇭🇰，台湾/taiwan/tw → TW 🇹🇼，
+新加坡/singapore/sg → SG 🇸🇬，美国/usa/us → US 🇺🇸，韩国/korea/kr → KR 🇰🇷，
+英国/uk/gb → UK/GB 🇬🇧，德国/germany/de → DE 🇩🇪，加拿大/canada/ca → CA 🇨🇦。
+`type:PROTO` 匹配代理的 type 字段，可与普通词组合，例如 `type:anytls`、
+`type:hysteria2`、`type:hy2 hk`。不再有模糊子序列回退。每个组内按成员顺序取
+第一个匹配项。未指定选择时，为每个选择组选择初始节点会跳过占位/信息节点
+（保留地址或空地址，以及名称含流量到期、重置、官网、客服等标记的节点）。
 组、`DIRECT` 和 `REJECT` 保持原样。
 
 ```sh
 cx run --config config.yaml --select 'hy2 us' -- curl https://example.com
 cx serve --config config.yaml --select 'Proxy=re:^🇯🇵'
 cx serve --config config.yaml --select 'Proxy=🇸🇬 Singapore'
+cx serve --config config.yaml --select 'type:anytls hk'
 CX_SELECT='Proxy=hy2 us;Auto=re:tokyo' cx serve --config config.yaml
 cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
 ```
@@ -447,8 +521,52 @@ sudo systemctl enable --now cx
 
 该单元使用 `/var/lib/cx`。请先以 root 执行
 `cx sub update --dir /var/lib/cx --sub URL`，或把配置复制到
-`/var/lib/cx/config.yaml`。TUN 模式可能需要 root；仅代理模式可取消注释
-`User=`/`Group=`。
+`/var/lib/cx/config.yaml`。单元设置了 `ExecReload=/bin/kill -HUP $MAINPID`，
+因此 `sudo systemctl reload cx` 可应用新配置而无需重启。TUN 模式可能需要
+root；仅代理模式可取消注释 `User=`/`Group=`。
+
+#### 公网服务器加固示例
+
+订阅是不可信输入：订阅中的配置可能设置 `allow-lan: true`，或启用额外监听端口。
+覆盖文件在订阅之后应用，因此应显式固定对外暴露面，而不要信任订阅。
+
+```sh
+sudo install -d -m 0700 /var/lib/cx /etc/cx
+sudo tee /var/lib/cx/override.yaml >/dev/null <<'EOF'
+allow-lan: false
+bind-address: 127.0.0.1
+port: 0
+socks-port: 0
+redir-port: 0
+tproxy-port: 0
+mixed-port: 7890
+mode: rule
+EOF
+sudo tee /etc/cx/cx.env >/dev/null <<'EOF'
+CX_SUB=https://example.com/subscription
+CX_SECRET=choose-a-long-random-secret
+EOF
+sudo chmod 0600 /etc/cx/cx.env
+```
+
+然后用 systemd drop-in 启用仅 loopback 的面板和控制器：
+
+```sh
+sudo systemctl edit cx
+```
+
+```ini
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/cx serve --dir /var/lib/cx --ui-addr 127.0.0.1:9090
+```
+
+secret 来自 `/etc/cx/cx.env` 中的 `CX_SECRET`（也可以使用 `--secret`）。
+若不想把订阅 URL 写进单元文件，可把每行一个 URL 放入
+`/etc/cx/subscriptions`（权限 `0600`），并在 `ExecStart` 中加入
+`--sub-file /etc/cx/subscriptions`，不设置 `CX_SUB`。`--ui-addr` 只绑定面板
+和控制器；请保持 loopback，并通过 SSH 隧道或带 TLS 与认证的反向代理访问。
+不要直接把控制器暴露到公网。
 
 launchd 配置位于
 [`packaging/launchd/com.dawnmagnet.cx.plist`](packaging/launchd/com.dawnmagnet.cx.plist)：
@@ -458,7 +576,13 @@ install -m 0644 packaging/launchd/com.dawnmagnet.cx.plist \
   ~/Library/LaunchAgents/com.dawnmagnet.cx.plist
 launchctl bootstrap gui/"$(id -u)" ~/Library/LaunchAgents/com.dawnmagnet.cx.plist
 launchctl kickstart -k gui/"$(id -u)"/com.dawnmagnet.cx
+launchctl kill SIGHUP gui/"$(id -u)"/com.dawnmagnet.cx   # 重载
 ```
+
+launchd 没有 `ExecReload` 或 `EnvironmentFile`；请使用 `launchctl kill SIGHUP`
+以及 `EnvironmentVariables` 或包装脚本。`KeepAlive` 的
+`SuccessfulExit=false` 对应 `Restart=on-failure`，`ThrottleInterval` 对应
+`RestartSec`。
 
 ### `cx run`
 
@@ -528,10 +652,17 @@ cx-private run -- curl https://example.com
 ### 查看配置与 payload
 
 ```sh
-cx config show                 # stdout 输出 YAML，secret 与凭据已脱敏
+cx config show                 # stdout 输出 YAML，凭据和敏感 URL 参数已脱敏
 cx config show --config FILE   # payload 信息输出到 stderr
 cx version                     # 版本 + 内嵌 payload 文件列表
 ```
+
+`config show` 只脱敏 password/private-key/auth/token/secret 等字段、URL
+userinfo，以及名称类似密钥的查询参数（`token`、`key`、`secret`、`password`、
+`auth`、`sig`）。proxy-provider 和订阅 URL 的所有查询参数都会隐藏。DoH 路径、
+不带凭据的 geox URL，以及不含敏感参数的 rule-provider URL 会保持可读。若未注入
+发布版本，`cx version` 会回退到模块版本或 Git revision（12 位，修改过时追加
+`-dirty`）。
 
 ### 测试与发布构建
 

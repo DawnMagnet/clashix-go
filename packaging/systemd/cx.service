@@ -8,15 +8,30 @@ Wants=network-online.target
 Type=simple
 # The service keeps its active config and geodata under /var/lib/cx.
 # Seed it with `cx serve --config ...` or `cx sub update --dir /var/lib/cx --sub ...`.
+# Optional environment file (CX_SUB, CX_SELECT, CX_SECRET, CX_UI_ADDR, ...).
+EnvironmentFile=-/etc/cx/cx.env
 ExecStart=/usr/local/bin/cx serve --dir /var/lib/cx
+ExecReload=/bin/kill -HUP $MAINPID
 StateDirectory=cx
 StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
 
-# TUN mode requires elevated privileges. For proxy-only operation, run as an
-# unprivileged user instead:
+# Hardening for ordinary proxy-only operation. TUN mode needs additional
+# privileges and devices; if you enable TUN, review these settings and run as
+# root or grant CAP_NET_ADMIN explicitly.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+# Without TUN, run as an unprivileged user:
 # User=cx
 # Group=cx
 

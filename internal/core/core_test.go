@@ -228,6 +228,9 @@ func TestExpectedErrorFilter(t *testing.T) {
 	if _, err := filter.Write([]byte(`time="now" level=error msg="External controller serve error: http: Server closed"` + "\n")); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := filter.Write([]byte(`time="now" level=warning msg="Mihomo shutting down"` + "\n")); err != nil {
+		t.Fatal(err)
+	}
 	if got := output.String(); got != "keep this line\n" {
 		t.Errorf("filtered output = %q", got)
 	}

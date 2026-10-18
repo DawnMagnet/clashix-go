@@ -2,6 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- launchd has no direct equivalents for systemd ExecReload or
+	     EnvironmentFile. Reload with:
+	     launchctl kill SIGHUP gui/$(id -u)/com.dawnmagnet.cx
+	     Put environment variables in EnvironmentVariables or a wrapper.
+	     KeepAlive below is the Restart=on-failure equivalent, and
+	     ThrottleInterval is the RestartSec equivalent. -->
 	<key>Label</key>
 	<string>com.dawnmagnet.cx</string>
 	<key>ProgramArguments</key>

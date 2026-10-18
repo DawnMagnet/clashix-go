@@ -24,14 +24,14 @@ type Spec struct {
 }
 
 type matcher struct {
-	raw      string
-	re       *regexp.Regexp
-	terms    []string
-	sequence string
+	raw   string
+	re    *regexp.Regexp
+	terms []string
 }
 
-// ParseSpecs parses selection specs. A spec without '=' applies to the
-// primary selector group; GROUP=PATTERN targets a group matched by GROUP.
+// ParseSpecs parses selection specs. A spec without '=' applies to every
+// select group containing a matching node; GROUP=PATTERN targets a group
+// matched by GROUP.
 func ParseSpecs(raw []string) ([]Spec, error) {
 	specs := make([]Spec, 0, len(raw))
 	for _, item := range raw {
@@ -106,85 +106,180 @@ func newMatcher(pattern string) (*matcher, error) {
 	}
 
 	m.terms = strings.Fields(strings.ToLower(pattern))
-	var sequence strings.Builder
-	for _, r := range pattern {
-		if unicode.IsSpace(r) {
-			continue
-		}
-		sequence.WriteRune(unicode.ToLower(r))
-	}
-	m.sequence = sequence.String()
-	if m.sequence == "" {
+	if len(m.terms) == 0 {
 		return nil, fmt.Errorf("pattern is empty")
+	}
+	for _, term := range m.terms {
+		if strings.HasPrefix(term, "type:") && strings.TrimSpace(term[len("type:"):]) == "" {
+			return nil, fmt.Errorf("type: requires a protocol name")
+		}
 	}
 	return m, nil
 }
 
-func (m *matcher) matches(candidate string) bool {
-	if m.re != nil {
-		return m.re.MatchString(candidate)
-	}
-	if m.termsMatch(candidate) {
-		return true
-	}
-	return isSubsequence(m.sequence, strings.ToLower(candidate))
+// regionAliases maps common region words to their flags. Two-letter aliases
+// are treated as whole tokens so codes such as "us" do not match "plus".
+type regionAlias struct {
+	names []string
+	flag  string
 }
 
-// match applies the matcher to a candidate list. Substring terms are tried
-// across the whole list first; the fuzzy subsequence pass only runs when no
-// candidate matched a term.
-func (m *matcher) match(candidates []string) (string, bool) {
-	if m.re != nil {
-		for _, candidate := range candidates {
-			if m.re.MatchString(candidate) {
-				return candidate, true
-			}
-		}
-		return "", false
-	}
-	if len(m.terms) > 0 {
-		for _, candidate := range candidates {
-			if m.termsMatch(candidate) {
-				return candidate, true
-			}
-		}
-	}
-	for _, candidate := range candidates {
-		if isSubsequence(m.sequence, strings.ToLower(candidate)) {
-			return candidate, true
-		}
-	}
-	return "", false
+var regionAliases = []regionAlias{
+	{names: []string{"日本", "japan", "jp"}, flag: "🇯🇵"},
+	{names: []string{"香港", "hongkong", "hong kong", "hk"}, flag: "🇭🇰"},
+	{names: []string{"台湾", "taiwan", "tw"}, flag: "🇹🇼"},
+	{names: []string{"新加坡", "singapore", "sg"}, flag: "🇸🇬"},
+	{names: []string{"美国", "usa", "united states", "us"}, flag: "🇺🇸"},
+	{names: []string{"韩国", "korea", "south korea", "kr"}, flag: "🇰🇷"},
+	{names: []string{"英国", "uk", "gb", "united kingdom", "great britain"}, flag: "🇬🇧"},
+	{names: []string{"德国", "germany", "de"}, flag: "🇩🇪"},
+	{names: []string{"加拿大", "canada", "ca"}, flag: "🇨🇦"},
 }
 
-func (m *matcher) termsMatch(candidate string) bool {
-	if len(m.terms) == 0 {
+func regionFor(word string) *regionAlias {
+	for i := range regionAliases {
+		for _, name := range regionAliases[i].names {
+			if word == name {
+				return &regionAliases[i]
+			}
+		}
+	}
+	return nil
+}
+
+func isShortCode(term string) bool {
+	if len(term) == 0 || len(term) > 2 {
 		return false
 	}
-	lower := strings.ToLower(candidate)
-	for _, term := range m.terms {
-		if !strings.Contains(lower, term) {
+	for _, r := range term {
+		if r < 'a' || r > 'z' {
 			return false
 		}
 	}
 	return true
 }
 
-func isSubsequence(needle, haystack string) bool {
-	needleRunes := []rune(needle)
-	if len(needleRunes) == 0 {
-		return false
-	}
-	index := 0
-	for _, r := range haystack {
-		if r == needleRunes[index] {
-			index++
-			if index == len(needleRunes) {
-				return true
-			}
+func containsToken(candidate, token string) bool {
+	for _, part := range strings.FieldsFunc(candidate, func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if part == token {
+			return true
 		}
 	}
 	return false
+}
+
+func termMatches(term, candidate string) bool {
+	if isShortCode(term) {
+		return containsToken(candidate, term)
+	}
+	return strings.Contains(candidate, term)
+}
+
+func wordMatches(word, candidate string) bool {
+	if region := regionFor(word); region != nil {
+		for _, alias := range region.names {
+			if termMatches(alias, candidate) {
+				return true
+			}
+		}
+		return strings.Contains(candidate, region.flag)
+	}
+	return termMatches(word, candidate)
+}
+
+var protocolAliases = map[string][]string{
+	"ss":     {"shadowsocks"},
+	"ssr":    {"shadowsocksr"},
+	"socks":  {"socks5"},
+	"hy":     {"hysteria"},
+	"hy2":    {"hysteria2"},
+	"wg":     {"wireguard"},
+	"anytls": {"anytls"},
+	"vless":  {"vless"},
+	"vmess":  {"vmess"},
+	"trojan": {"trojan"},
+	"tuic":   {"tuic"},
+	"mieru":  {"mieru"},
+	"snell":  {"snell"},
+}
+
+func typeMatches(candidateType, protocol string) bool {
+	candidateType = strings.ToLower(strings.TrimSpace(candidateType))
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if candidateType == "" || protocol == "" {
+		return false
+	}
+	if candidateType == protocol {
+		return true
+	}
+	for _, alias := range protocolAliases[protocol] {
+		if candidateType == alias {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *matcher) matches(candidate string) bool {
+	return m.matchesCandidate(candidate, "")
+}
+
+func (m *matcher) matchesCandidate(name, kind string) bool {
+	if m.re != nil {
+		return m.re.MatchString(name)
+	}
+	lower := strings.ToLower(name)
+	for _, term := range m.terms {
+		if !m.termMatches(term, lower, kind) {
+			return false
+		}
+	}
+	return len(m.terms) > 0
+}
+
+func (m *matcher) termMatches(term, candidate, kind string) bool {
+	if strings.HasPrefix(term, "type:") {
+		return typeMatches(kind, term[len("type:"):])
+	}
+	return wordMatches(term, candidate)
+}
+
+func (m *matcher) matchedWordCount(name, kind string) int {
+	if m.re != nil {
+		if m.re.MatchString(name) {
+			return 1
+		}
+		return 0
+	}
+	lower := strings.ToLower(name)
+	count := 0
+	for _, term := range m.terms {
+		if m.termMatches(term, lower, kind) {
+			count++
+		}
+	}
+	return count
+}
+
+// match applies the matcher to a candidate list in order.
+func (m *matcher) match(candidates []string) (string, bool) {
+	for _, candidate := range candidates {
+		if m.matches(candidate) {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func (m *matcher) matchProxy(members []C.Proxy) (string, bool) {
+	for _, member := range members {
+		if m.matchesCandidate(member.Name(), member.Adapter().Type().String()) {
+			return member.Name(), true
+		}
+	}
+	return "", false
 }
 
 type groupInfo struct {
@@ -283,15 +378,6 @@ func finalMatchTarget(cfg map[string]any) string {
 	return target
 }
 
-func selectGroupByName(groups []groupInfo, name string) (groupInfo, bool) {
-	for _, group := range groups {
-		if group.kind == "select" && group.name == name {
-			return group, true
-		}
-	}
-	return groupInfo{}, false
-}
-
 func matchGroup(groups []groupInfo, m *matcher) (string, error) {
 	if m == nil {
 		return "", fmt.Errorf("missing group matcher")
@@ -308,7 +394,7 @@ func matchGroup(groups []groupInfo, m *matcher) (string, error) {
 	if name, ok := m.match(candidates); ok {
 		return name, nil
 	}
-	return "", fmt.Errorf("no select proxy group matches %q; closest groups: %s", m.raw, strings.Join(closest(m.raw, candidates, 5), ", "))
+	return "", fmt.Errorf("no select proxy group matches %q; closest groups: %s", m.raw, formatClosest(m, nameCandidates(candidates), 5))
 }
 
 // Apply applies selection specs to running mihomo groups and then skips
@@ -380,8 +466,7 @@ func applyBarePattern(spec Spec, groups []groupInfo, proxies map[string]C.Proxy,
 		if len(members) == 0 {
 			continue
 		}
-		names := memberNames(members)
-		if selected, ok := spec.patternMatcher.match(names); ok {
+		if selected, ok := spec.patternMatcher.matchProxy(members); ok {
 			plans = append(plans, plan{group: info.name, selected: selected})
 			matched++
 			continue
@@ -392,11 +477,8 @@ func applyBarePattern(spec Spec, groups []groupInfo, proxies map[string]C.Proxy,
 	}
 
 	if matched == 0 {
-		if primary == "" {
-			return fmt.Errorf("no select proxy group found for node selection %q", spec.Pattern)
-		}
-		candidates := primaryCandidates(primary, proxies, groups)
-		return fmt.Errorf("no proxy in primary group %q matches %q; closest candidates: %s", primary, spec.Pattern, strings.Join(closest(spec.Pattern, candidates, 5), ", "))
+		candidates := proxyCandidates(groups, proxies, "")
+		return fmt.Errorf("no proxy node in any select group matches %q; the selection applies to all select groups containing a matching node; closest candidates: %s", spec.Pattern, formatClosest(spec.patternMatcher, candidates, 5))
 	}
 
 	for _, plan := range plans {
@@ -421,24 +503,15 @@ func applyToGroup(spec Spec, groupName string, proxies map[string]C.Proxy, targe
 	if len(members) == 0 {
 		return fmt.Errorf("proxy group %q has no members", groupName)
 	}
-	names := memberNames(members)
-	selected, ok := spec.patternMatcher.match(names)
+	selected, ok := spec.patternMatcher.matchProxy(members)
 	if !ok {
-		return fmt.Errorf("no proxy in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, strings.Join(closest(spec.Pattern, names, 5), ", "))
+		return fmt.Errorf("no proxy node in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, formatClosest(spec.patternMatcher, proxyMemberCandidates(members), 5))
 	}
 	if err := setSelected(proxy, selected); err != nil {
 		return fmt.Errorf("select %q in group %q: %w", selected, groupName, err)
 	}
 	targeted[groupName] = true
 	return nil
-}
-
-func memberNames(members []C.Proxy) []string {
-	names := make([]string, 0, len(members))
-	for _, member := range members {
-		names = append(names, member.Name())
-	}
-	return names
 }
 
 func containsMember(members []C.Proxy, name string) bool {
@@ -450,16 +523,54 @@ func containsMember(members []C.Proxy, name string) bool {
 	return false
 }
 
-func primaryCandidates(primary string, proxies map[string]C.Proxy, groups []groupInfo) []string {
-	if proxy, ok := proxies[primary]; ok {
-		if names := memberNames(groupMembers(proxy)); len(names) > 0 {
-			return names
+func proxyMemberCandidates(members []C.Proxy) []nodeCandidate {
+	seen := make(map[string]struct{})
+	candidates := make([]nodeCandidate, 0, len(members))
+	for _, member := range members {
+		if !isNodeCandidate(member) {
+			continue
+		}
+		name := member.Name()
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		candidates = append(candidates, nodeCandidate{name: name, kind: member.Adapter().Type().String()})
+	}
+	return candidates
+}
+
+func isNodeCandidate(proxy C.Proxy) bool {
+	if _, group := proxy.Adapter().(outboundgroup.ProxyGroup); group {
+		return false
+	}
+	switch proxy.Adapter().Type() {
+	case C.Direct, C.Reject, C.RejectDrop, C.Compatible, C.Pass, C.PassRule, C.Rematch, C.Dns:
+		return false
+	}
+	return !isPlaceholder(proxy)
+}
+
+func proxyCandidates(groups []groupInfo, proxies map[string]C.Proxy, onlyGroup string) []nodeCandidate {
+	seen := make(map[string]struct{})
+	var candidates []nodeCandidate
+	for _, info := range groups {
+		if info.kind != "select" || (onlyGroup != "" && info.name != onlyGroup) {
+			continue
+		}
+		proxy, ok := proxies[info.name]
+		if !ok {
+			continue
+		}
+		for _, candidate := range proxyMemberCandidates(groupMembers(proxy)) {
+			if _, exists := seen[candidate.name]; exists {
+				continue
+			}
+			seen[candidate.name] = struct{}{}
+			candidates = append(candidates, candidate)
 		}
 	}
-	if group, ok := selectGroupByName(groups, primary); ok {
-		return append([]string(nil), group.members...)
-	}
-	return nil
+	return candidates
 }
 
 func groupMembers(proxy C.Proxy) []C.Proxy {
@@ -575,23 +686,55 @@ func isPlaceholderInfo(name, address string) bool {
 	return false
 }
 
-func closest(pattern string, candidates []string, limit int) []string {
+type nodeCandidate struct {
+	name string
+	kind string
+}
+
+func nameCandidates(names []string) []nodeCandidate {
+	out := make([]nodeCandidate, 0, len(names))
+	for _, name := range names {
+		out = append(out, nodeCandidate{name: name})
+	}
+	return out
+}
+
+func formatClosest(m *matcher, candidates []nodeCandidate, limit int) string {
+	names := closest(m, candidates, limit)
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
+}
+
+// closest ranks real proxy nodes by the number of matching words. Edit
+// distance is only a tie-breaker so unrelated nodes keep a stable order.
+func closest(m *matcher, candidates []nodeCandidate, limit int) []string {
 	type scored struct {
-		name  string
-		score int
-		order int
+		name     string
+		matches  int
+		distance int
+		order    int
 	}
 	scoredCandidates := make([]scored, 0, len(candidates))
 	for index, candidate := range candidates {
+		distance := 0
+		if m.re == nil {
+			distance = editDistance(normalizePattern(m.raw), strings.ToLower(candidate.name))
+		}
 		scoredCandidates = append(scoredCandidates, scored{
-			name:  candidate,
-			score: editDistance(normalizePattern(pattern), strings.ToLower(candidate)),
-			order: index,
+			name:     candidate.name,
+			matches:  m.matchedWordCount(candidate.name, candidate.kind),
+			distance: distance,
+			order:    index,
 		})
 	}
 	sort.SliceStable(scoredCandidates, func(i, j int) bool {
-		if scoredCandidates[i].score != scoredCandidates[j].score {
-			return scoredCandidates[i].score < scoredCandidates[j].score
+		if scoredCandidates[i].matches != scoredCandidates[j].matches {
+			return scoredCandidates[i].matches > scoredCandidates[j].matches
+		}
+		if scoredCandidates[i].distance != scoredCandidates[j].distance {
+			return scoredCandidates[i].distance < scoredCandidates[j].distance
 		}
 		return scoredCandidates[i].order < scoredCandidates[j].order
 	})

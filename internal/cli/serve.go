@@ -36,6 +36,17 @@ func newServeCmd() *cobra.Command {
 		Long:  "Run the proxy service in the foreground. Stop it with SIGINT or SIGTERM. On Unix, SIGHUP reloads the configuration sources.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// Register signal handlers before any configuration loading or
+			// subscription fetching. A SIGHUP during startup must not hit Go's
+			// default action and kill the process.
+			ctx, stop := signal.NotifyContext(cmd.Context(), stopSignals()...)
+			defer stop()
+			reloadCh := make(chan os.Signal, 1)
+			if signals := reloadSignals(); len(signals) > 0 {
+				signal.Notify(reloadCh, signals...)
+				defer signal.Stop(reloadCh)
+			}
+
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
 			}
@@ -57,12 +68,15 @@ func newServeCmd() *cobra.Command {
 				overlay.ExternalController = config.StringPtr(resolvedUI)
 			}
 
-			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stopSignals()
-
 			cfg, err := loadEffectiveConfig(ctx, &opts, overlay, true, configPath)
 			if err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return err
+			}
+			if ctx.Err() != nil {
+				return nil
 			}
 			warnInsecureController(cmd, "serve", cfg)
 			secret, generated, err := ensureControllerSecret(cfg, "")
@@ -89,6 +103,9 @@ func newServeCmd() *cobra.Command {
 
 			engine := newCore()
 			if err := engine.Start(ctx, stateDir, data); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return fmt.Errorf("start core: %w", err)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: configuration active in %s\n", stateDir)
@@ -148,11 +165,8 @@ func newServeCmd() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reloaded configuration (%s)\n", reason)
 			}
 
-			reloadCh := make(chan os.Signal, 1)
-			if signals := reloadSignals(); len(signals) > 0 {
-				signal.Notify(reloadCh, signals...)
-				defer signal.Stop(reloadCh)
-			}
+			// A SIGHUP received before the core was ready remains queued in
+			// reloadCh and is coalesced into one reload by this loop.
 			var tickerC <-chan time.Time
 			if subInterval > 0 {
 				ticker := time.NewTicker(subInterval)
@@ -300,6 +314,9 @@ func newRunCmd() *cobra.Command {
 			}
 			engine := newCore()
 			if err := engine.Start(ctx, stateDir, data); err != nil {
+				if ctx.Err() != nil {
+					return nil
+				}
 				return fmt.Errorf("start core: %w", err)
 			}
 			defer func() {

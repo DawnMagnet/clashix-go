@@ -17,14 +17,25 @@ func TestMatcher(t *testing.T) {
 		name      string
 		pattern   string
 		candidate string
+		kind      string
 		want      bool
 	}{
 		{name: "all terms substrings", pattern: "hy2 us", candidate: "🇺🇸 [Hy2]US 01", want: true},
 		{name: "case insensitive", pattern: "HY2 us", candidate: "🇺🇸 [hy2]US 01", want: true},
-		{name: "subsequence fallback", pattern: "h2u", candidate: "Hy2 US 01", want: true},
 		{name: "missing term", pattern: "hy2 jp", candidate: "🇺🇸 [Hy2]US 01", want: false},
+		{name: "no subsequence fallback", pattern: "h2u", candidate: "Hy2 US 01", want: false},
 		{name: "regex", pattern: "re:^🇯🇵 .* 0[1-3]$", candidate: "🇯🇵 Tokyo 02", want: true},
 		{name: "regex is case insensitive", pattern: "re:tokyo", candidate: "🇯🇵 TOKYO 02", want: true},
+		{name: "region alias japan", pattern: "japan", candidate: "🇯🇵 Tokyo 01", want: true},
+		{name: "region alias chinese", pattern: "香港", candidate: "🇭🇰 Hong Kong 01", want: true},
+		{name: "region alias hongkong", pattern: "hongkong", candidate: "🇭🇰 HK 01", want: true},
+		{name: "region code token", pattern: "us", candidate: "🇺🇸 [Hy2]US 01", want: true},
+		{name: "short code is not a substring", pattern: "us", candidate: "plus 01", want: false},
+		{name: "region code maps to flag", pattern: "gb", candidate: "🇬🇧 London 01", want: true},
+		{name: "type anytls", pattern: "type:anytls", candidate: "AnyTLS 01", kind: "AnyTLS", want: true},
+		{name: "type hy2 alias", pattern: "type:hy2", candidate: "Hysteria 01", kind: "Hysteria2", want: true},
+		{name: "type combined with region", pattern: "type:anytls hk", candidate: "🇭🇰 AnyTLS 01", kind: "AnyTLS", want: true},
+		{name: "type mismatch", pattern: "type:anytls", candidate: "🇭🇰 AnyTLS 01", kind: "Hysteria2", want: false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -32,21 +43,21 @@ func TestMatcher(t *testing.T) {
 			if err != nil {
 				t.Fatalf("newMatcher: %v", err)
 			}
-			if got := matcher.matches(test.candidate); got != test.want {
-				t.Errorf("matches(%q, %q) = %v, want %v", test.pattern, test.candidate, got, test.want)
+			if got := matcher.matchesCandidate(test.candidate, test.kind); got != test.want {
+				t.Errorf("matches(%q, %q, %q) = %v, want %v", test.pattern, test.candidate, test.kind, got, test.want)
 			}
 		})
 	}
 }
 
-func TestMatcherPrefersTermMatchOverEarlierFuzzyCandidate(t *testing.T) {
+func TestMatcherPrefersEarlierTermMatch(t *testing.T) {
 	matcher, err := newMatcher("ab")
 	if err != nil {
 		t.Fatalf("newMatcher: %v", err)
 	}
 	got, ok := matcher.match([]string{"aXb", "AB target"})
 	if !ok || got != "AB target" {
-		t.Fatalf("match = %q, %v; want the substring candidate", got, ok)
+		t.Fatalf("match = %q, %v; want the whole-token candidate", got, ok)
 	}
 }
 
@@ -116,13 +127,70 @@ func TestPlaceholderInfo(t *testing.T) {
 }
 
 func TestClosestCandidates(t *testing.T) {
-	candidates := []string{"🇯🇵 Tokyo 01", "🇯🇵 Tokyo 02", "🇯🇵 Osaka 01", "🇸🇬 Singapore 01", "🇺🇸 New York 01", "🇩🇪 Frankfurt 01"}
-	got := closest("tokio", candidates, 5)
+	matcher, err := newMatcher("tokio")
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	candidates := []nodeCandidate{
+		{name: "🇯🇵 Tokyo 01"},
+		{name: "🇯🇵 Tokyo 02"},
+		{name: "🇯🇵 Osaka 01"},
+		{name: "🇸🇬 Singapore 01"},
+		{name: "🇺🇸 New York 01"},
+		{name: "🇩🇪 Frankfurt 01"},
+	}
+	got := closest(matcher, candidates, 5)
 	if len(got) != 5 {
 		t.Fatalf("closest returned %d candidates, want 5: %v", len(got), got)
 	}
 	if got[0] != "🇯🇵 Tokyo 01" && got[0] != "🇯🇵 Tokyo 02" {
 		t.Errorf("closest first candidate = %q, want a Tokyo node", got[0])
+	}
+}
+
+func TestClosestRanksByMatchingWords(t *testing.T) {
+	matcher, err := newMatcher("hy2 us")
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	candidates := []nodeCandidate{
+		{name: "🇯🇵 Tokyo 01"},
+		{name: "🇺🇸 [Hy2]US 01"},
+		{name: "🇺🇸 US 02"},
+	}
+	got := closest(matcher, candidates, 3)
+	if got[0] != "🇺🇸 [Hy2]US 01" {
+		t.Errorf("closest first candidate = %q, want the node matching both words", got[0])
+	}
+}
+
+func TestApplyRegionAndTypeSelection(t *testing.T) {
+	proxyMap := testProxyMap(t,
+		[]map[string]any{
+			{"name": "🇯🇵 Tokyo 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 AnyTLS US 01", "type": "anytls", "server": "198.51.100.20", "port": 443, "password": "made-up"},
+			{"name": "Cyprus 01", "type": "ss", "server": "198.51.100.30", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"🇯🇵 Tokyo 01", "🇺🇸 AnyTLS US 01", "Cyprus 01"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"🇯🇵 Tokyo 01", "🇺🇸 AnyTLS US 01", "Cyprus 01"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	if err := Apply(cfg, []string{"us"}); err != nil {
+		t.Fatalf("Apply region: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Proxy"); got != "🇺🇸 AnyTLS US 01" {
+		t.Errorf("region selection = %q, want the US node", got)
+	}
+	if err := Apply(cfg, []string{"type:anytls"}); err != nil {
+		t.Fatalf("Apply type: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Proxy"); got != "🇺🇸 AnyTLS US 01" {
+		t.Errorf("type selection = %q, want the AnyTLS node", got)
 	}
 }
 
@@ -245,9 +313,14 @@ func TestApplyBarePatternAcrossSelectGroups(t *testing.T) {
 	if err == nil {
 		t.Fatal("Apply succeeded without a matching candidate")
 	}
-	for _, want := range []string{"primary group", "Proxies", "closest candidates", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"} {
+	for _, want := range []string{"any select group", "closest candidates", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	for _, unwanted := range []string{"primary group", "DIRECT", "REJECT", "Proxies,", "Google,"} {
+		if strings.Contains(err.Error(), unwanted) {
+			t.Errorf("error %q mentions non-node candidate %q", err, unwanted)
 		}
 	}
 }

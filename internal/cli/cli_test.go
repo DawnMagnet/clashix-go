@@ -99,6 +99,29 @@ func TestVersionCommand(t *testing.T) {
 	}
 }
 
+func TestEffectiveVersionKeepsInjectedVersion(t *testing.T) {
+	if got := effectiveVersion("v1.2.3"); got != "v1.2.3" {
+		t.Errorf("effectiveVersion = %q, want the injected version", got)
+	}
+}
+
+func TestBoolFlagHelpShowsExplicitFalse(t *testing.T) {
+	root := NewRoot("test-version")
+	serve, _, err := root.Find([]string{"serve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"allow-lan", "ui"} {
+		flag := serve.Flags().Lookup(name)
+		if flag == nil {
+			t.Fatalf("--%s is missing", name)
+		}
+		if !strings.Contains(flag.Usage, "--"+name+"=false") {
+			t.Errorf("--%s help = %q, want the explicit false form", name, flag.Usage)
+		}
+	}
+}
+
 func TestNoConfigSourceError(t *testing.T) {
 	opts := &configOptions{}
 	_, err := loadEffectiveConfig(context.Background(), opts, config.Overlay{}, false, filepath.Join(t.TempDir(), "missing.yaml"))
@@ -141,10 +164,13 @@ proxy-providers:
 	}
 
 	output := out.String()
-	for _, secret := range []string{"super-controller-secret", "alice", "hunter2", "provider-user", "provider-pass"} {
+	for _, secret := range []string{"super-controller-secret", "hunter2", "provider-user", "provider-pass"} {
 		if strings.Contains(output, secret) {
 			t.Errorf("config show leaked %q:\n%s", secret, output)
 		}
+	}
+	if !strings.Contains(output, "username: alice") {
+		t.Errorf("config show over-redacted the non-secret username:\n%s", output)
 	}
 	if !strings.Contains(output, config.Redacted) {
 		t.Errorf("config show did not mark redacted values:\n%s", output)
