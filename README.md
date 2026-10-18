@@ -12,15 +12,31 @@ with an embedded config and geodata payload.
 
 ### Install
 
-Download `cx-<os>-<arch>` (`.exe` on Windows) and `SHA256SUMS` from the GitHub
-releases page, verify the checksum, and install the binary:
+Releases contain bare binaries plus `SHA256SUMS`:
+
+`cx-linux-amd64`, `cx-linux-arm64`, `cx-linux-arm` (armv7), `cx-darwin-amd64`,
+`cx-darwin-arm64`, `cx-windows-amd64.exe`, `cx-windows-arm64.exe`,
+`cx-freebsd-amd64`, `cx-freebsd-arm64`, and `SHA256SUMS`.
+
+Linux/macOS:
 
 ```sh
-curl -LO https://github.com/DawnMagnet/clashix-go/releases/latest/download/cx-linux-amd64
-curl -LO https://github.com/DawnMagnet/clashix-go/releases/latest/download/SHA256SUMS
-sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
-install -m 0755 cx-linux-amd64 /usr/local/bin/cx
+curl -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/cx-linux-amd64
+curl -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
+chmod +x cx-linux-amd64
+sudo install -m 0755 cx-linux-amd64 /usr/local/bin/cx
 cx version
+```
+
+Windows (PowerShell; use Git Bash or WSL for `sha256sum`):
+
+```powershell
+curl.exe -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/cx-windows-amd64.exe
+curl.exe -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+Move-Item cx-windows-amd64.exe cx.exe
+.\cx.exe version
 ```
 
 `cx version` also reports whether an embedded payload is present and which
@@ -61,6 +77,12 @@ Run the service in the foreground. Logs go to stderr. SIGINT/SIGTERM stop it
 gracefully. On Unix, SIGHUP re-reads the configuration sources, validates the
 result, and applies it without replacing the last-good file until validation
 succeeds. `--sub-interval 6h` periodically refreshes subscriptions and reloads.
+
+When `external-controller` is enabled and the effective config has no secret,
+`cx serve` generates a random controller secret at startup and prints it to
+stderr once so you can log in. A non-empty `secret` in the config or a
+`--secret` flag always wins. When the controller is disabled, no secret is
+added.
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
@@ -136,6 +158,10 @@ cx-private run -- curl https://example.com
 resolved at pack time; subscription URLs are never embedded. The resulting
 binary uses its embedded config and geodata with no flags.
 
+`cx pack` strips the controller `secret` from the embedded config and prints a
+note. A later `cx serve` from that binary generates a fresh secret at startup if
+the external controller is enabled.
+
 > **Security warning:** a packed binary contains resolved proxy configuration
 > and credentials. Keep it private. Never commit, upload, publish, or share it.
 > If proxies, a remote proxy provider, or any subscription was packed, `cx`
@@ -172,15 +198,31 @@ build the same matrix with `-trimpath -ldflags "-s -w -X main.version=<tag>"`.
 
 ### 安装
 
-从 GitHub Releases 下载对应的 `cx-<os>-<arch>` 二进制（Windows 为 `.exe`）和
-`SHA256SUMS`，校验后安装：
+Release 提供裸二进制文件和 `SHA256SUMS`：
+
+`cx-linux-amd64`、`cx-linux-arm64`、`cx-linux-arm`（armv7）、`cx-darwin-amd64`、
+`cx-darwin-arm64`、`cx-windows-amd64.exe`、`cx-windows-arm64.exe`、
+`cx-freebsd-amd64`、`cx-freebsd-arm64` 和 `SHA256SUMS`。
+
+Linux/macOS：
 
 ```sh
-curl -LO https://github.com/DawnMagnet/clashix-go/releases/latest/download/cx-linux-amd64
-curl -LO https://github.com/DawnMagnet/clashix-go/releases/latest/download/SHA256SUMS
-sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
-install -m 0755 cx-linux-amd64 /usr/local/bin/cx
+curl -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/cx-linux-amd64
+curl -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS   # macOS: shasum -a 256 -c SHA256SUMS
+chmod +x cx-linux-amd64
+sudo install -m 0755 cx-linux-amd64 /usr/local/bin/cx
 cx version
+```
+
+Windows（PowerShell；`sha256sum` 可在 Git Bash 或 WSL 中执行）：
+
+```powershell
+curl.exe -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/cx-windows-amd64.exe
+curl.exe -fLO https://github.com/DawnMagnet/clashix-go/releases/latest/download/SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
+Move-Item cx-windows-amd64.exe cx.exe
+.\cx.exe version
 ```
 
 `cx version` 还会报告是否内嵌 payload，以及其中包含哪些文件。
@@ -217,6 +259,10 @@ mode、日志等级、控制器、secret）最后覆盖。如果以上来源都�
 前台运行服务。日志只写 stderr；SIGINT/SIGTERM 优雅退出。Unix 下 SIGHUP
 会重新读取配置来源、校验后应用，校验成功前不会替换 last-good 文件。
 `--sub-interval 6h` 可定期刷新订阅并重载。
+
+启用 `external-controller` 且有效配置没有 secret 时，`cx serve` 会在启动时
+生成随机控制器 secret，并向 stderr 打印一次，方便登录。配置中的非空
+`secret` 或 `--secret` 参数始终优先。控制器未启用时不会添加 secret。
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
@@ -288,6 +334,9 @@ cx-private run -- curl https://example.com
 `--geodata` 只从目录中挑选已知文件：`geoip.metadb`、`geoip.dat`、
 `geosite.dat`、`GeoLite2-ASN.mmdb`、`ASN.mmdb`。订阅在打包时解析，订阅 URL
 不会写入二进制。产物无需任何参数即可使用内嵌配置和 geodata 执行 `run`。
+
+`cx pack` 会从内嵌配置中删除控制器 `secret` 并打印提示。之后用该二进制运行
+`cx serve` 时，如果启用了外部控制器，会在启动时生成新的随机 secret。
 
 > **安全警告：** 打包后的二进制包含解析后的代理配置和凭据。必须保持私有，
 > 不要提交、上传、发布或分享。只要打包了代理、远程 proxy-provider 或任何订阅，

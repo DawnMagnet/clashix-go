@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -45,9 +46,12 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			secret, err := ensureSecret(cfg, "")
+			secret, generated, err := ensureControllerSecret(cfg, "")
 			if err != nil {
 				return err
+			}
+			if generated {
+				logControllerSecret(cmd, "serve", secret)
 			}
 			data, err := config.Marshal(cfg)
 			if err != nil {
@@ -72,10 +76,13 @@ func newServeCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) failed: %v\n", reason, err)
 					return
 				}
-				newSecret, err := ensureSecret(newCfg, secret)
+				newSecret, generated, err := ensureControllerSecret(newCfg, secret)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) secret failed: %v\n", reason, err)
 					return
+				}
+				if generated {
+					logControllerSecret(cmd, "serve", newSecret)
 				}
 				newData, err := config.Marshal(newCfg)
 				if err != nil {
@@ -190,8 +197,12 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := ensureSecret(cfg, ""); err != nil {
+			secret, generated, err := ensureControllerSecret(cfg, "")
+			if err != nil {
 				return err
+			}
+			if generated {
+				logControllerSecret(cmd, "run", secret)
 			}
 			data, err := config.Marshal(cfg)
 			if err != nil {
@@ -232,18 +243,26 @@ func newRunCmd() *cobra.Command {
 	return cmd
 }
 
-func ensureSecret(cfg map[string]any, fallback string) (string, error) {
+func ensureControllerSecret(cfg map[string]any, fallback string) (string, bool, error) {
 	if secret, ok := cfg["secret"].(string); ok && secret != "" {
-		return secret, nil
+		return secret, false, nil
+	}
+	controller, _ := cfg["external-controller"].(string)
+	if strings.TrimSpace(controller) == "" {
+		return "", false, nil
 	}
 	if fallback != "" {
 		cfg["secret"] = fallback
-		return fallback, nil
+		return fallback, false, nil
 	}
 	secret, err := config.GenerateSecret()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	cfg["secret"] = secret
-	return secret, nil
+	return secret, true, nil
+}
+
+func logControllerSecret(cmd *cobra.Command, mode, secret string) {
+	fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: generated controller secret: %s\n", mode, secret)
 }

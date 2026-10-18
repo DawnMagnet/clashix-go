@@ -195,8 +195,8 @@ func TestRunOverridesPortsAndController(t *testing.T) {
 	if port, _ := cfg["mixed-port"].(int); port <= 0 {
 		t.Errorf("mixed-port = %v, want a selected port", cfg["mixed-port"])
 	}
-	if secret, _ := cfg["secret"].(string); secret == "" {
-		t.Error("run did not set a controller secret")
+	if _, exists := cfg["secret"]; exists {
+		t.Errorf("run added a secret while the controller is disabled: %#v", cfg["secret"])
 	}
 }
 
@@ -236,7 +236,7 @@ func TestPackAndReadPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "input.yaml")
-	if err := os.WriteFile(configPath, []byte("port: 7890\nproxies:\n  - name: node\n    type: ss\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("port: 7890\nsecret: pack-secret\nproxies:\n  - name: node\n    type: ss\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	geodataDir := filepath.Join(dir, "geo")
@@ -291,6 +291,12 @@ func TestPackAndReadPayload(t *testing.T) {
 	if packedCfg["port"] != 7890 {
 		t.Errorf("packed port = %v", packedCfg["port"])
 	}
+	if _, exists := packedCfg["secret"]; exists {
+		t.Error("packed config retained the controller secret")
+	}
+	if !strings.Contains(stderr.String(), "stripped the controller secret") {
+		t.Errorf("pack did not report stripping the secret: %q", stderr.String())
+	}
 }
 
 func TestSubUpdateWritesStateConfig(t *testing.T) {
@@ -342,9 +348,48 @@ func TestServeWritesConfigAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load served config: %v", err)
 	}
+	if _, ok := cfg["secret"]; ok {
+		t.Errorf("serve added a secret while the controller is disabled: %#v", cfg["secret"])
+	}
+}
+
+func TestServeGeneratesControllerSecret(t *testing.T) {
+	useFakeCore(t)
+	state := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mixed-port: 0\nexternal-controller: 127.0.0.1:0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--config", configPath, "--dir", state})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	cfg, err := config.Load(config.DefaultConfigPath(state))
+	if err != nil {
+		t.Fatalf("Load served config: %v", err)
+	}
 	secret, ok := cfg["secret"].(string)
 	if !ok || secret == "" {
-		t.Errorf("serve did not persist a random secret: %#v", cfg["secret"])
+		t.Fatalf("serve did not persist a generated secret: %#v", cfg["secret"])
+	}
+	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
+		t.Errorf("serve did not log the generated secret: %q", stderr.String())
+	}
+
+	if _, generated, err := ensureControllerSecret(cfg, secret); err != nil || generated {
+		t.Errorf("second startup regenerated the secret: generated=%v err=%v", generated, err)
 	}
 }
 
@@ -404,5 +449,93 @@ func TestPackWarnsForSubscription(t *testing.T) {
 	}
 	if _, ok, err := payload.Read(output); err != nil || !ok {
 		t.Fatalf("packed output = %v, %v; want payload", ok, err)
+	}
+}
+
+func TestEnsureControllerSecret(t *testing.T) {
+	tests := []struct {
+		name          string
+		cfg           map[string]any
+		fallback      string
+		wantSecret    string
+		wantGenerated bool
+	}{
+		{
+			name: "controller disabled does not add a secret",
+			cfg:  map[string]any{"external-controller": ""},
+		},
+		{
+			name:          "controller enabled generates one",
+			cfg:           map[string]any{"external-controller": "127.0.0.1:9090"},
+			wantGenerated: true,
+		},
+		{
+			name:          "configured secret wins",
+			cfg:           map[string]any{"external-controller": "127.0.0.1:9090", "secret": "configured"},
+			wantSecret:    "configured",
+			wantGenerated: false,
+		},
+		{
+			name:          "reload keeps existing secret",
+			cfg:           map[string]any{"external-controller": "127.0.0.1:9090"},
+			fallback:      "existing",
+			wantSecret:    "existing",
+			wantGenerated: false,
+		},
+		{
+			name:       "secret preserved when controller disabled",
+			cfg:        map[string]any{"external-controller": "", "secret": "configured"},
+			wantSecret: "configured",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			secret, generated, err := ensureControllerSecret(test.cfg, test.fallback)
+			if err != nil {
+				t.Fatalf("ensureControllerSecret: %v", err)
+			}
+			if generated != test.wantGenerated {
+				t.Errorf("generated = %v, want %v", generated, test.wantGenerated)
+			}
+			if test.wantSecret != "" && secret != test.wantSecret {
+				t.Errorf("secret = %q, want %q", secret, test.wantSecret)
+			}
+			if test.wantGenerated && secret == "" {
+				t.Error("generated secret is empty")
+			}
+			if test.wantSecret == "" && !test.wantGenerated {
+				if _, exists := test.cfg["secret"]; exists {
+					t.Errorf("unexpected secret added: %#v", test.cfg["secret"])
+				}
+			}
+		})
+	}
+}
+
+func TestRunGeneratesSecretWithController(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetArgs([]string{
+		"run", "--config", writeConfig(t),
+		"--controller", "127.0.0.1:9090",
+		"--", "sh", "-c", "exit 0",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil || lastFakeCore.config == nil {
+		t.Fatal("core did not receive a configuration")
+	}
+	secret, _ := lastFakeCore.config["secret"].(string)
+	if secret == "" {
+		t.Fatal("run did not generate a controller secret")
+	}
+	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
+		t.Errorf("run did not log the generated secret: %q", stderr.String())
 	}
 }

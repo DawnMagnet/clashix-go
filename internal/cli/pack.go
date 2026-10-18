@@ -44,6 +44,10 @@ func newPackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if _, ok := cfg["secret"]; ok {
+				delete(cfg, "secret")
+				fmt.Fprintln(cmd.ErrOrStderr(), "cx pack: stripped the controller secret from the embedded config; serve will generate one at startup if the controller is enabled.")
+			}
 			data, err := config.Marshal(cfg)
 			if err != nil {
 				return err
