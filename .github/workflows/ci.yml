@@ -81,12 +81,19 @@ jobs:
           go-version-file: go.mod
           cache: false  # module + build caches handled below
 
+      # Keep Go caches on a runner-local path; on Windows D: is much faster than C:.
+      - name: Point Go caches at a fast disk
+        shell: bash
+        run: |
+          base="${{ runner.os == 'Windows' && 'D:/gocache' || format('{0}/gocache', runner.temp) }}"
+          echo "GOCACHE=${base}/build" >> "$GITHUB_ENV"
+          echo "GOMODCACHE=${base}/mod" >> "$GITHUB_ENV"
+          echo "CACHE_BASE=${base}" >> "$GITHUB_ENV"
+
       - name: Cache Go build cache
         uses: actions/cache@v4
         with:
-          path: |
-            ~/go/pkg/mod
-            ${{ runner.os == 'Windows' && '~/AppData/Local/go-build' || '~/Library/Caches/go-build' }}
+          path: ${{ env.CACHE_BASE }}
           key: gobuild-test-${{ matrix.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
           restore-keys: gobuild-test-${{ matrix.os }}-${{ hashFiles('go.sum') }}-
 
