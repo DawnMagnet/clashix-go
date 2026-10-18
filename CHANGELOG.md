@@ -13,6 +13,8 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- `--ui` is now a boolean switch; use `--ui-addr ADDR` or `CX_UI_ADDR` to
+  choose the controller and panel address.
 - `cx run` now defaults to `log-level: warning`, keeps core logs on stderr, and
   suppresses info-level shutdown logs.
 - Commands fail with an actionable error when no configuration source exists.

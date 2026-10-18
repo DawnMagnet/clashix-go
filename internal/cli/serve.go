@@ -25,6 +25,7 @@ func newServeCmd() *cobra.Command {
 	var (
 		dir         string
 		subInterval time.Duration
+		ui          bool
 		uiAddr      string
 		opts        configOptions
 	)
@@ -47,7 +48,7 @@ func newServeCmd() *cobra.Command {
 			}
 			configPath := config.DefaultConfigPath(stateDir)
 			overlay := opts.overlay(cmd)
-			resolvedUI, uiSet := resolveUI(cmd, uiAddr)
+			resolvedUI, uiSet := resolveUI(cmd, ui, uiAddr)
 			if uiSet {
 				overlay.ExternalController = config.StringPtr(resolvedUI)
 			}
@@ -172,7 +173,7 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "state directory (default: user config directory/cx)")
 	cmd.Flags().DurationVar(&subInterval, "sub-interval", 0, "periodically refresh subscriptions and reload")
-	addUIFlag(cmd, &uiAddr)
+	addUIFlag(cmd, &ui, &uiAddr)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
@@ -181,6 +182,7 @@ func newRunCmd() *cobra.Command {
 	var (
 		opts       configOptions
 		controller string
+		ui         bool
 		uiAddr     string
 	)
 
@@ -198,9 +200,9 @@ func newRunCmd() *cobra.Command {
 			defer stopSignals()
 
 			overlay := opts.overlay(cmd)
-			resolvedUI, uiSet := resolveUI(cmd, uiAddr)
-			if !cmd.Flags().Changed("ui") && cmd.Flags().Changed("controller") {
-				// An explicit --controller wins over the CX_UI environment.
+			resolvedUI, uiSet := resolveUI(cmd, ui, uiAddr)
+			if !cmd.Flags().Changed("ui") && !cmd.Flags().Changed("ui-addr") && cmd.Flags().Changed("controller") {
+				// An explicit --controller wins over the CX_UI / CX_UI_ADDR environment.
 				resolvedUI, uiSet = "", false
 			}
 			if uiSet {
@@ -300,7 +302,7 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&controller, "controller", "", "external controller address (disabled when empty)")
-	addUIFlag(cmd, &uiAddr)
+	addUIFlag(cmd, &ui, &uiAddr)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
@@ -330,14 +332,57 @@ func logControllerSecret(cmd *cobra.Command, mode, secret string) {
 	fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: generated controller secret: %s\n", mode, secret)
 }
 
-func resolveUI(cmd *cobra.Command, flagValue string) (string, bool) {
-	if cmd.Flags().Changed("ui") {
-		return strings.TrimSpace(flagValue), strings.TrimSpace(flagValue) != ""
+func resolveUI(cmd *cobra.Command, enabled bool, address string) (string, bool) {
+	// --ui-addr always implies --ui, including when --ui=false is passed.
+	if cmd.Flags().Changed("ui-addr") {
+		return uiAddress(address), true
 	}
+	if cmd.Flags().Changed("ui") {
+		if !enabled {
+			return "", false
+		}
+		return uiAddress(address), true
+	}
+
 	if value := strings.TrimSpace(os.Getenv("CX_UI")); value != "" {
-		return value, true
+		on, legacyAddress := parseUIEnv(value)
+		if !on {
+			return "", false
+		}
+		if addr := strings.TrimSpace(os.Getenv("CX_UI_ADDR")); addr != "" {
+			return addr, true
+		}
+		if legacyAddress != "" {
+			return legacyAddress, true
+		}
+		return defaultUIAddress, true
+	}
+	if addr := strings.TrimSpace(os.Getenv("CX_UI_ADDR")); addr != "" {
+		return addr, true
 	}
 	return "", false
+}
+
+func uiAddress(value string) string {
+	if value = strings.TrimSpace(value); value != "" {
+		return value
+	}
+	return defaultUIAddress
+}
+
+// parseUIEnv accepts boolean-like CX_UI values. An address is also accepted for
+// compatibility with the earlier CX_UI=ADDR form.
+func parseUIEnv(value string) (bool, string) {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on", "enabled":
+		return true, ""
+	case "0", "false", "no", "off", "disabled":
+		return false, ""
+	}
+	if strings.Contains(value, ":") {
+		return true, value
+	}
+	return false, ""
 }
 
 func controllerEndpoints(cfg map[string]any) (main, tls string) {

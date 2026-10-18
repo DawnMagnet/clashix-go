@@ -104,9 +104,11 @@ Binding a non-loopback controller without a configured secret prints an
 additional warning.
 
 The built-in metacubexd panel is served at `/ui/` whenever a controller is
-enabled and the binary was built with `-tags ui`. `--ui` (or `CX_UI`) enables
-the controller and panel; `--ui` alone uses `127.0.0.1:9090`. The login URL is
-printed at startup. Panel version, checksum, and MIT license are recorded in
+enabled and the binary was built with `-tags ui`. The boolean `--ui` flag (or a
+boolean-like `CX_UI`, for example `1` or `true`) enables the controller and
+panel. `--ui-addr ADDR` (or `CX_UI_ADDR`) chooses the bind address and implies
+`--ui`; the default is `127.0.0.1:9090`. The login URL is printed at startup.
+Panel version, checksum, and MIT license are recorded in
 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
 
 ```sh
@@ -114,8 +116,8 @@ cx serve --config ~/.config/cx/config.yaml
 cx serve --sub 'https://example.com/subscription' --sub-interval 12h
 cx serve --dir /var/lib/cx
 cx serve --ui                       # controller + panel on 127.0.0.1:9090
-cx serve --ui 0.0.0.0:9090 --secret 'choose-a-strong-secret'
-CX_UI=127.0.0.1:9090 CX_SECRET=... cx serve
+cx serve --ui --ui-addr 0.0.0.0:9090 --secret 'choose-a-strong-secret'
+CX_UI=1 CX_UI_ADDR=127.0.0.1:9090 CX_SECRET=... cx serve
 ```
 
 A systemd unit is provided at
@@ -154,13 +156,14 @@ cx run --config direct.yaml -- curl https://example.com
 cx run --sub 'https://example.com/subscription' -- git clone https://example.com/repo.git
 cx run --log-level info --config direct.yaml -- bash
 cx run --ui --config direct.yaml -- curl http://127.0.0.1:9090/ui/
+cx run --ui --ui-addr 127.0.0.1:9090 --config direct.yaml -- curl https://example.com
 ```
 
 Run-mode log level defaults to `warning`; core logs are written only to stderr.
-External controller access is disabled unless `--controller ADDR`, `--ui`, or
-`CX_UI` is given. `--ui` enables the controller and the bundled panel; `--ui`
-alone uses `127.0.0.1:9090`. As in `serve`, a missing secret is generated and
-printed once.
+External controller access is disabled unless `--controller ADDR`, `--ui`,
+`--ui-addr ADDR`, or `CX_UI`/`CX_UI_ADDR` is given. `--ui` enables the
+controller and the bundled panel; `--ui-addr` implies `--ui` and defaults to
+`127.0.0.1:9090`. As in `serve`, a missing secret is generated and printed once.
 
 ### Subscriptions
 
@@ -318,17 +321,18 @@ stderr 打印一次，方便登录。配置中的非空 `secret`、`CX_SECRET` �
 未配置 secret，还会打印额外警告。
 
 启用控制器且二进制使用 `-tags ui` 构建时，内置 metacubexd 面板会通过 `/ui/`
-提供。`--ui`（或 `CX_UI`）会启用控制器和面板；单独使用 `--ui` 时地址为
-`127.0.0.1:9090`。启动时会打印登录 URL。面板版本、校验和与 MIT 许可证记录在
-[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
+提供。布尔标志 `--ui`（或布尔风格的 `CX_UI`，例如 `1`、`true`）会启用控制器
+和面板。`--ui-addr ADDR`（或 `CX_UI_ADDR`）用于指定监听地址，并隐含启用
+`--ui`；默认地址为 `127.0.0.1:9090`。启动时会打印登录 URL。面板版本、校验和
+与 MIT 许可证记录在 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
 cx serve --sub 'https://example.com/subscription' --sub-interval 12h
 cx serve --dir /var/lib/cx
 cx serve --ui                       # 控制器 + 面板，127.0.0.1:9090
-cx serve --ui 0.0.0.0:9090 --secret 'choose-a-strong-secret'
-CX_UI=127.0.0.1:9090 CX_SECRET=... cx serve
+cx serve --ui --ui-addr 0.0.0.0:9090 --secret 'choose-a-strong-secret'
+CX_UI=1 CX_UI_ADDR=127.0.0.1:9090 CX_SECRET=... cx serve
 ```
 
 systemd 单元文件位于
@@ -366,12 +370,14 @@ cx run --config direct.yaml -- curl https://example.com
 cx run --sub 'https://example.com/subscription' -- git clone https://example.com/repo.git
 cx run --log-level info --config direct.yaml -- bash
 cx run --ui --config direct.yaml -- curl http://127.0.0.1:9090/ui/
+cx run --ui --ui-addr 127.0.0.1:9090 --config direct.yaml -- curl https://example.com
 ```
 
 `run` 模式日志等级默认为 `warning`，核心日志只写 stderr。除非传入
-`--controller ADDR`、`--ui` 或设置 `CX_UI`，否则外部控制器关闭。`--ui`
-会启用控制器和内置面板；单独使用 `--ui` 时地址为 `127.0.0.1:9090`。
-与 `serve` 一样，缺少 secret 时会自动生成并打印一次。
+`--controller ADDR`、`--ui`、`--ui-addr ADDR` 或设置 `CX_UI`/`CX_UI_ADDR`，
+否则外部控制器关闭。`--ui` 会启用控制器和内置面板；`--ui-addr` 隐含启用
+`--ui`，默认地址为 `127.0.0.1:9090`。与 `serve` 一样，缺少 secret 时会自动
+生成并打印一次。
 
 ### 订阅
 

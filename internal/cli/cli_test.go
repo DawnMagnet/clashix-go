@@ -695,14 +695,15 @@ func TestRunCXUIEnvironment(t *testing.T) {
 		t.Skip("shell test uses sh")
 	}
 	useFakeCore(t)
-	t.Setenv("CX_UI", "127.0.0.1:19090")
+	t.Setenv("CX_UI", "true")
+	t.Setenv("CX_UI_ADDR", "127.0.0.1:19090")
 	root := NewRoot("dev")
 	root.SetArgs([]string{"run", "--config", writeConfig(t), "--", "sh", "-c", "exit 0"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if got := lastFakeCore.config["external-controller"]; got != "127.0.0.1:19090" {
-		t.Errorf("external-controller = %v, want CX_UI value", got)
+		t.Errorf("external-controller = %v, want CX_UI_ADDR value", got)
 	}
 }
 
@@ -852,38 +853,108 @@ func TestWarnInsecureController(t *testing.T) {
 	}
 }
 
-func TestNormalizeUIArgs(t *testing.T) {
+func TestRunUIArgsReachChild(t *testing.T) {
+	t.Setenv("CX_TEST_CHILD_ARGS", "1")
 	tests := []struct {
-		name string
-		in   []string
-		want []string
+		name           string
+		uiArgs         []string
+		wantController string
 	}{
 		{
-			name: "bare ui",
-			in:   []string{"run", "--ui", "--", "curl", "x"},
-			want: []string{"run", "--ui", "--", "curl", "x"},
+			name:           "ui with separate address",
+			uiArgs:         []string{"--ui", "--ui-addr", "127.0.0.1:19091"},
+			wantController: "127.0.0.1:19091",
 		},
 		{
-			name: "space separated address",
-			in:   []string{"run", "--ui", "127.0.0.1:9090", "--", "curl"},
-			want: []string{"run", "--ui=127.0.0.1:9090", "--", "curl"},
+			name:           "bare ui",
+			uiArgs:         []string{"--ui"},
+			wantController: defaultUIAddress,
 		},
 		{
-			name: "equals form",
-			in:   []string{"run", "--ui=127.0.0.1:9090", "--", "curl"},
-			want: []string{"run", "--ui=127.0.0.1:9090", "--", "curl"},
-		},
-		{
-			name: "does not touch child args",
-			in:   []string{"run", "--", "echo", "--ui", "127.0.0.1:9090"},
-			want: []string{"run", "--", "echo", "--ui", "127.0.0.1:9090"},
+			name:           "address implies ui",
+			uiArgs:         []string{"--ui-addr", "127.0.0.1:19092"},
+			wantController: "127.0.0.1:19092",
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := normalizeUIArgs(test.in)
-			if strings.Join(got, "\x00") != strings.Join(test.want, "\x00") {
-				t.Errorf("normalizeUIArgs = %#v, want %#v", got, test.want)
+			useFakeCore(t)
+			root := NewRoot("dev")
+			var out strings.Builder
+			root.SetOut(&out)
+			args := []string{"run", "--config", writeConfig(t)}
+			args = append(args, test.uiArgs...)
+			args = append(args, "--", os.Args[0], "-test.run=TestRunChildArgsHelper", "--", "alpha", "beta")
+			root.SetArgs(args)
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if lastFakeCore == nil || lastFakeCore.config == nil {
+				t.Fatal("core did not receive a configuration")
+			}
+			if got := lastFakeCore.config["external-controller"]; got != test.wantController {
+				t.Errorf("external-controller = %v, want %v", got, test.wantController)
+			}
+			if got := strings.TrimSpace(out.String()); got != "alpha\nbeta" {
+				t.Errorf("child args = %q, want %q", got, "alpha\nbeta")
+			}
+		})
+	}
+}
+
+func TestRunChildArgsHelper(t *testing.T) {
+	if os.Getenv("CX_TEST_CHILD_ARGS") != "1" {
+		return
+	}
+	for i, arg := range os.Args {
+		if arg == "--" {
+			fmt.Print(strings.Join(os.Args[i+1:], "\n"))
+			os.Exit(0)
+		}
+	}
+	os.Exit(2)
+}
+
+func TestResolveUIEnvAndFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		env     map[string]string
+		want    string
+		wantSet bool
+	}{
+		{name: "disabled by default"},
+		{name: "ui flag", args: []string{"--ui"}, want: defaultUIAddress, wantSet: true},
+		{name: "ui addr flag", args: []string{"--ui-addr", "127.0.0.1:19091"}, want: "127.0.0.1:19091", wantSet: true},
+		{name: "false ui flag disables env", args: []string{"--ui=false"}, env: map[string]string{"CX_UI": "true"}},
+		{name: "bool env", env: map[string]string{"CX_UI": "yes"}, want: defaultUIAddress, wantSet: true},
+		{name: "env address", env: map[string]string{"CX_UI": "1", "CX_UI_ADDR": "127.0.0.1:19092"}, want: "127.0.0.1:19092", wantSet: true},
+		{name: "address env alone", env: map[string]string{"CX_UI_ADDR": "127.0.0.1:19093"}, want: "127.0.0.1:19093", wantSet: true},
+		{name: "false env disables address env", env: map[string]string{"CX_UI": "false", "CX_UI_ADDR": "127.0.0.1:19094"}},
+		{name: "legacy address env", env: map[string]string{"CX_UI": "127.0.0.1:19095"}, want: "127.0.0.1:19095", wantSet: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("CX_UI", "")
+			t.Setenv("CX_UI_ADDR", "")
+			for key, value := range test.env {
+				t.Setenv(key, value)
+			}
+			cmd := newRunCmd()
+			if err := cmd.ParseFlags(test.args); err != nil {
+				t.Fatal(err)
+			}
+			enabled, err := cmd.Flags().GetBool("ui")
+			if err != nil {
+				t.Fatal(err)
+			}
+			address, err := cmd.Flags().GetString("ui-addr")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, gotSet := resolveUI(cmd, enabled, address)
+			if got != test.want || gotSet != test.wantSet {
+				t.Errorf("resolveUI = %q, %v; want %q, %v", got, gotSet, test.want, test.wantSet)
 			}
 		})
 	}

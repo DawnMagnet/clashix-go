@@ -4,7 +4,6 @@ package cli
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -33,32 +32,8 @@ func NewRoot(version string) *cobra.Command {
 // Execute runs the command tree.
 func Execute(version string) error {
 	root := NewRoot(version)
-	root.SetArgs(normalizeUIArgs(os.Args[1:]))
+	root.SetArgs(os.Args[1:])
 	return root.Execute()
-}
-
-// normalizeUIArgs allows --ui to be used both bare (default bind address) and
-// with a space-separated address. pflag's NoOptDefVal normally requires
-// --ui=ADDR for an explicit value.
-func normalizeUIArgs(args []string) []string {
-	normalized := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
-			normalized = append(normalized, args[i:]...)
-			break
-		}
-		if arg == "--ui" && i+1 < len(args) {
-			next := args[i+1]
-			if next != "--" && !strings.HasPrefix(next, "-") && strings.Contains(next, ":") {
-				normalized = append(normalized, "--ui="+next)
-				i++
-				continue
-			}
-		}
-		normalized = append(normalized, arg)
-	}
-	return normalized
 }
 
 func newVersionCmd(version string) *cobra.Command {

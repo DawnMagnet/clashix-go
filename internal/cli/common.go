@@ -91,9 +91,10 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	return overlay
 }
 
-func addUIFlag(cmd *cobra.Command, value *string) {
-	cmd.Flags().StringVar(value, "ui", "", "enable the controller and web panel at ADDR (default 127.0.0.1:9090)")
-	cmd.Flags().Lookup("ui").NoOptDefVal = defaultUIAddress
+func addUIFlag(cmd *cobra.Command, enabled *bool, address *string) {
+	flags := cmd.Flags()
+	flags.BoolVar(enabled, "ui", false, "enable the controller and web panel")
+	flags.StringVar(address, "ui-addr", defaultUIAddress, "controller and web panel address (implies --ui)")
 }
 
 func (opts *configOptions) validatePorts(cmd *cobra.Command) error {
