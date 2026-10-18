@@ -108,16 +108,20 @@ overrides `x-cx-select`. The key is never passed to mihomo.
 
 SPEC forms:
 
-- `PATTERN` targets the primary selector group: the select group used by the
-  final `MATCH` rule, otherwise the first select group in `proxy-groups`. If
-  that group only contains other groups, the first nested select group with
-  real proxies is used.
-- `GROUP=PATTERN` targets a select group whose name matches `GROUP`.
+- `PATTERN` applies to every select group that directly contains a matching
+  proxy, choosing that group's first match. Groups without a matching direct
+  member are left unchanged, except that a group containing the primary
+  selector group as a member is set to the primary group. The primary selector
+  group is the select group used by the final `MATCH` rule, otherwise the first
+  select group in `proxy-groups`. A bare pattern errors only when no group
+  contains a match, listing closest candidates from the primary group.
+- `GROUP=PATTERN` targets a select group whose name matches `GROUP`. Precise
+  group specs run after bare patterns and win.
 
 A pattern starting with `re:` is a case-insensitive Go regular expression.
 Otherwise every whitespace-separated term must be a case-insensitive substring
-of the candidate name, with a fuzzy subsequence fallback. The first match in
-group order wins; a miss lists the closest candidates. Without a selection,
+of the candidate name, with a fuzzy subsequence fallback. Within each group,
+the first matching member in member order wins. Without a selection,
 placeholder/info nodes (reserved or empty servers, and names containing traffic
 expiry/reset/website/support markers) are skipped when choosing every select
 group's initial node. Groups, `DIRECT`, and `REJECT` are kept as-is.
@@ -382,16 +386,19 @@ mihomo。
 
 SPEC 形式：
 
-- `PATTERN`：作用于主选择组——最终 `MATCH` 规则引用的选择组；若它不存在或不是
-  选择组，则取 `proxy-groups` 中第一个选择组。如果该组成员都是组，则使用第一个
-  包含真实代理的嵌套选择组。
-- `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。
+- `PATTERN`：作用于所有直接包含匹配代理的选择组，并为每个组选择组内第一个匹配
+  项。没有匹配直接成员的组保持不变；但如果该组把主选择组作为成员，则把该组设置
+  为主选择组。主选择组是最终 `MATCH` 规则引用的选择组；若它不存在或不是选择组，
+  则取 `proxy-groups` 中第一个选择组。裸模式只有在所有组都没有匹配时才报错，并
+  列出主选择组中最接近的候选。
+- `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。精确组规则在裸模式之后
+  执行，并且优先。
 
 以 `re:` 开头的模式是不区分大小写的 Go 正则；否则按空白拆分，每个词都必须
-不区分大小写地作为候选名称的子串，若都不匹配再回退到模糊子序列匹配。按组内
-顺序取第一个匹配项；无匹配时会列出最接近的候选。未指定选择时，为每个选择组
-选择初始节点会跳过占位/信息节点（保留地址或空地址，以及名称含流量到期、重置、
-官网、客服等标记的节点）。组、`DIRECT` 和 `REJECT` 保持原样。
+不区分大小写地作为候选名称的子串，若都不匹配再回退到模糊子序列匹配。每个组内
+按成员顺序取第一个匹配项。未指定选择时，为每个选择组选择初始节点会跳过占位/信息
+节点（保留地址或空地址，以及名称含流量到期、重置、官网、客服等标记的节点）。
+组、`DIRECT` 和 `REJECT` 保持原样。
 
 ```sh
 cx run --config config.yaml --select 'hy2 us' -- curl https://example.com

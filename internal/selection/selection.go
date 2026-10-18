@@ -321,7 +321,8 @@ func Apply(cfg map[string]any, raw []string) error {
 	return ApplyParsed(cfg, specs)
 }
 
-// ApplyParsed applies already parsed specs.
+// ApplyParsed applies already parsed specs. Bare patterns run first across all
+// select groups; precise GROUP=PATTERN specs run afterwards and win.
 func ApplyParsed(cfg map[string]any, specs []Spec) error {
 	if len(specs) == 0 {
 		return applyPlaceholderDefaults(cfg, nil)
@@ -329,90 +330,136 @@ func ApplyParsed(cfg map[string]any, specs []Spec) error {
 
 	groups := configGroups(cfg)
 	proxies := tunnel.Proxies()
+	primary := primaryGroupName(cfg, groups)
 	targeted := make(map[string]bool)
+
 	for _, spec := range specs {
-		groupName := ""
+		if spec.Group != "" {
+			continue
+		}
+		if err := applyBarePattern(spec, groups, proxies, primary, targeted); err != nil {
+			return err
+		}
+	}
+	for _, spec := range specs {
 		if spec.Group == "" {
-			groupName = primaryGroupName(cfg, groups)
-			if groupName == "" {
-				return fmt.Errorf("no select proxy group found for node selection %q", spec.Pattern)
-			}
-		} else {
-			matched, err := matchGroup(groups, spec.groupMatcher)
-			if err != nil {
-				return err
-			}
-			groupName = matched
+			continue
 		}
-
-		groupName = resolveNestedSelect(groupName, proxies)
-		proxy, ok := proxies[groupName]
-		if !ok {
-			return fmt.Errorf("proxy group %q is not available", groupName)
+		groupName, err := matchGroup(groups, spec.groupMatcher)
+		if err != nil {
+			return err
 		}
-		members := groupMembers(proxy)
-		if len(members) == 0 {
-			return fmt.Errorf("proxy group %q has no members", groupName)
+		if err := applyToGroup(spec, groupName, proxies, targeted); err != nil {
+			return err
 		}
-
-		names := make([]string, 0, len(members))
-		for _, member := range members {
-			names = append(names, member.Name())
-		}
-		selected, ok := spec.patternMatcher.match(names)
-		if !ok {
-			return fmt.Errorf("no proxy in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, strings.Join(closest(spec.Pattern, names, 5), ", "))
-		}
-		if err := setSelected(proxy, selected); err != nil {
-			return fmt.Errorf("select %q in group %q: %w", selected, groupName, err)
-		}
-		targeted[groupName] = true
 	}
 
 	return applyPlaceholderDefaults(cfg, targeted)
 }
 
-func resolveNestedSelect(name string, proxies map[string]C.Proxy) string {
-	proxy, ok := proxies[name]
-	if !ok {
-		return name
+func applyBarePattern(spec Spec, groups []groupInfo, proxies map[string]C.Proxy, primary string, targeted map[string]bool) error {
+	if len(groups) == 0 {
+		return fmt.Errorf("no select proxy group found for node selection %q", spec.Pattern)
 	}
-	members := groupMembers(proxy)
-	if len(members) == 0 || hasRealProxy(members) {
-		return name
-	}
-	if nested := firstNestedSelect(members, map[string]bool{name: true}); nested != "" {
-		return nested
-	}
-	return name
-}
 
-func firstNestedSelect(members []C.Proxy, seen map[string]bool) string {
-	for _, member := range members {
-		name := member.Name()
-		if seen[name] {
+	type plan struct {
+		group    string
+		selected string
+	}
+	var plans []plan
+	matched := 0
+	for _, info := range groups {
+		if info.kind != "select" {
 			continue
 		}
-		seen[name] = true
-		if member.Adapter().Type() == C.Selector && hasRealProxy(groupMembers(member)) {
-			return name
+		proxy, ok := proxies[info.name]
+		if !ok {
+			continue
 		}
-		if _, group := member.Adapter().(outboundgroup.ProxyGroup); group {
-			if nested := firstNestedSelect(groupMembers(member), seen); nested != "" {
-				return nested
-			}
+		members := groupMembers(proxy)
+		if len(members) == 0 {
+			continue
+		}
+		names := memberNames(members)
+		if selected, ok := spec.patternMatcher.match(names); ok {
+			plans = append(plans, plan{group: info.name, selected: selected})
+			matched++
+			continue
+		}
+		if info.name != primary && primary != "" && containsMember(members, primary) {
+			plans = append(plans, plan{group: info.name, selected: primary})
 		}
 	}
-	return ""
+
+	if matched == 0 {
+		if primary == "" {
+			return fmt.Errorf("no select proxy group found for node selection %q", spec.Pattern)
+		}
+		candidates := primaryCandidates(primary, proxies, groups)
+		return fmt.Errorf("no proxy in primary group %q matches %q; closest candidates: %s", primary, spec.Pattern, strings.Join(closest(spec.Pattern, candidates, 5), ", "))
+	}
+
+	for _, plan := range plans {
+		proxy, ok := proxies[plan.group]
+		if !ok {
+			return fmt.Errorf("proxy group %q is not available", plan.group)
+		}
+		if err := setSelected(proxy, plan.selected); err != nil {
+			return fmt.Errorf("select %q in group %q: %w", plan.selected, plan.group, err)
+		}
+		targeted[plan.group] = true
+	}
+	return nil
 }
 
-func hasRealProxy(members []C.Proxy) bool {
+func applyToGroup(spec Spec, groupName string, proxies map[string]C.Proxy, targeted map[string]bool) error {
+	proxy, ok := proxies[groupName]
+	if !ok {
+		return fmt.Errorf("proxy group %q is not available", groupName)
+	}
+	members := groupMembers(proxy)
+	if len(members) == 0 {
+		return fmt.Errorf("proxy group %q has no members", groupName)
+	}
+	names := memberNames(members)
+	selected, ok := spec.patternMatcher.match(names)
+	if !ok {
+		return fmt.Errorf("no proxy in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, strings.Join(closest(spec.Pattern, names, 5), ", "))
+	}
+	if err := setSelected(proxy, selected); err != nil {
+		return fmt.Errorf("select %q in group %q: %w", selected, groupName, err)
+	}
+	targeted[groupName] = true
+	return nil
+}
+
+func memberNames(members []C.Proxy) []string {
+	names := make([]string, 0, len(members))
 	for _, member := range members {
-		if _, group := member.Adapter().(outboundgroup.ProxyGroup); !group {
+		names = append(names, member.Name())
+	}
+	return names
+}
+
+func containsMember(members []C.Proxy, name string) bool {
+	for _, member := range members {
+		if member.Name() == name {
 			return true
 		}
 	}
 	return false
+}
+
+func primaryCandidates(primary string, proxies map[string]C.Proxy, groups []groupInfo) []string {
+	if proxy, ok := proxies[primary]; ok {
+		if names := memberNames(groupMembers(proxy)); len(names) > 0 {
+			return names
+		}
+	}
+	if group, ok := selectGroupByName(groups, primary); ok {
+		return append([]string(nil), group.members...)
+	}
+	return nil
 }
 
 func groupMembers(proxy C.Proxy) []C.Proxy {

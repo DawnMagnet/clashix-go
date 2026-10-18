@@ -8,9 +8,10 @@ All notable changes to this project are documented in this file.
 
 - Node selection with `--select SPEC` on `run`, `serve`, and `pack`,
   semicolon-separated `CX_SELECT`, and the local `x-cx-select` config key.
-  Specs support the primary selector group, `GROUP=PATTERN`, case-insensitive
-  Go regexps, term/subsequence matching, deterministic first-match selection,
-  and closest-candidate errors. The key is stripped before mihomo starts.
+  Specs support bare patterns across select groups, precise `GROUP=PATTERN`,
+  case-insensitive Go regexps, term/subsequence matching, deterministic
+  first-match selection, and closest-candidate errors. The key is stripped
+  before mihomo starts.
 - Override files deep-merged over subscription/config sources: state-directory
   `override.yaml`, repeatable `--override FILE`, and `CX_OVERRIDE`. Maps merge
   recursively while lists and scalars replace.
@@ -21,6 +22,10 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Bare `PATTERN` selection applies to every select group that directly contains
+  a matching member, sets groups containing the primary group to it, and leaves
+  other groups unchanged. Precise `GROUP=PATTERN` specs run afterwards and win;
+  bare selection only errors when no group contains a match.
 - Ports `0` now disable listeners for `--port`, `--socks-port`, `--mixed-port`,
   `--redir-port`, and `--tproxy-port`; `cx run` auto-picks a mixed port when it
   is omitted or `0`.

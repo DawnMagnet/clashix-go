@@ -188,38 +188,64 @@ func TestApplyDefaultSkipsPlaceholders(t *testing.T) {
 	}
 }
 
-func TestApplyNestedGroupAndNoMatch(t *testing.T) {
+func TestApplyBarePatternAcrossSelectGroups(t *testing.T) {
 	proxyMap := testProxyMap(t,
 		[]map[string]any{
-			{"name": "node-a", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
-			{"name": "node-b", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 [Hy2]US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇯🇵 Tokyo 01", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇸🇬 Singapore 01", "type": "ss", "server": "198.51.100.30", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
 		},
 		[]map[string]any{
-			{"name": "Auto", "type": "select", "proxies": []any{"node-a", "node-b"}},
-			{"name": "Main", "type": "select", "proxies": []any{"Auto"}},
+			{"name": "Proxies", "type": "select", "proxies": []any{"🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"}},
+			{"name": "Google", "type": "select", "proxies": []any{"Proxies", "DIRECT", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"}},
+			{"name": "Media", "type": "select", "proxies": []any{"DIRECT", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"}},
+			{"name": "AI", "type": "select", "proxies": []any{"Proxies", "DIRECT", "🇯🇵 Tokyo 01"}},
+			{"name": "Other", "type": "select", "proxies": []any{"🇯🇵 Tokyo 01", "DIRECT"}},
 		},
 	)
 	cfg := map[string]any{
-		"rules": []any{"MATCH,Main"},
+		"rules": []any{"MATCH,Proxies"},
 		"proxy-groups": []any{
-			map[string]any{"name": "Auto", "type": "select", "proxies": []any{"node-a", "node-b"}},
-			map[string]any{"name": "Main", "type": "select", "proxies": []any{"Auto"}},
+			map[string]any{"name": "Proxies", "type": "select", "proxies": []any{"🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"}},
+			map[string]any{"name": "Google", "type": "select", "proxies": []any{"Proxies", "DIRECT", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"}},
+			map[string]any{"name": "Media", "type": "select", "proxies": []any{"DIRECT", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"}},
+			map[string]any{"name": "AI", "type": "select", "proxies": []any{"Proxies", "DIRECT", "🇯🇵 Tokyo 01"}},
+			map[string]any{"name": "Other", "type": "select", "proxies": []any{"🇯🇵 Tokyo 01", "DIRECT"}},
 		},
 	}
 	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
 
-	if err := Apply(cfg, []string{"node-b"}); err != nil {
-		t.Fatalf("Apply nested: %v", err)
+	if err := Apply(cfg, []string{"hy2 us"}); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
-	if got := groupNow(t, proxyMap, "Auto"); got != "node-b" {
-		t.Errorf("nested selection = %q, want node-b", got)
+	for _, group := range []string{"Proxies", "Google", "Media"} {
+		if got := groupNow(t, proxyMap, group); got != "🇺🇸 [Hy2]US 01" {
+			t.Errorf("%s = %q, want the matching Hy2 node", group, got)
+		}
+	}
+	if got := groupNow(t, proxyMap, "AI"); got != "Proxies" {
+		t.Errorf("AI = %q, want fallback to the primary group", got)
+	}
+	if got := groupNow(t, proxyMap, "Other"); got != "🇯🇵 Tokyo 01" {
+		t.Errorf("Other = %q, want its group left alone", got)
+	}
+
+	// Precise GROUP=PATTERN specs run after bare patterns and win.
+	if err := Apply(cfg, []string{"Google=tokyo", "hy2 us"}); err != nil {
+		t.Fatalf("Apply with precise group: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Google"); got != "🇯🇵 Tokyo 01" {
+		t.Errorf("Google = %q, want the precise group selection to win", got)
+	}
+	if got := groupNow(t, proxyMap, "Media"); got != "🇺🇸 [Hy2]US 01" {
+		t.Errorf("Media = %q, want the bare pattern to remain in effect", got)
 	}
 
 	err := Apply(cfg, []string{"no-such-node"})
 	if err == nil {
 		t.Fatal("Apply succeeded without a matching candidate")
 	}
-	for _, want := range []string{"closest candidates", "node-a", "node-b"} {
+	for _, want := range []string{"primary group", "Proxies", "closest candidates", "🇺🇸 [Hy2]US 01", "🇯🇵 Tokyo 01"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not mention %q", err, want)
 		}
@@ -256,8 +282,10 @@ func testProxyMap(t *testing.T, proxies []map[string]any, groups []map[string]an
 	t.Helper()
 	proxyMap := map[string]C.Proxy{
 		"COMPATIBLE": adapter.NewProxy(outbound.NewCompatible()),
+		"DIRECT":     adapter.NewProxy(outbound.NewDirect()),
+		"REJECT":     adapter.NewProxy(outbound.NewReject()),
 	}
-	allProxies := []string{"COMPATIBLE"}
+	allProxies := []string{"COMPATIBLE", "DIRECT", "REJECT"}
 	for _, mapping := range proxies {
 		proxy, err := adapter.ParseProxy(mapping)
 		if err != nil {
