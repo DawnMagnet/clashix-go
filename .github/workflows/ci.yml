@@ -53,8 +53,8 @@ jobs:
       - name: Vet
         run: go vet -tags "with_gvisor no_zerotier no_easytier no_tailscale" ./...
 
-      - name: Test (short)
-        run: go test -short -tags "with_gvisor no_zerotier no_easytier no_tailscale" ./...
+      - name: Test
+        run: go test -tags "with_gvisor no_zerotier no_easytier no_tailscale" ./...
 
       - name: Test with bundled panel
         run: go test -short -tags "ui with_gvisor no_zerotier no_easytier no_tailscale" ./...
@@ -79,10 +79,20 @@ jobs:
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false  # module + build caches handled below
 
-      - name: Test
-        run: go test -tags "with_gvisor no_zerotier no_easytier no_tailscale" ./...
+      - name: Cache Go build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ${{ runner.os == 'Windows' && '~/AppData/Local/go-build' || '~/Library/Caches/go-build' }}
+          key: gobuild-test-${{ matrix.os }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: gobuild-test-${{ matrix.os }}-${{ hashFiles('go.sum') }}-
+
+      # Linux runs the full suite in the check job; other OSes run -short.
+      - name: Test (short)
+        run: go test -short -tags "with_gvisor no_zerotier no_easytier no_tailscale" ./...
 
   cross-build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}

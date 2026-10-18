@@ -127,8 +127,8 @@ jobs:
           NAME: ${{ steps.build.outputs.name }}
         run: |
           set -euo pipefail
-          # -9 is ~40% faster than --best for <0.1% larger output.
-          upx -9 -q "dist/${NAME}"
+          # -7 takes ~1/4 of the time of -9/--best for ~1 MB (~6%) larger output.
+          upx -7 -q "dist/${NAME}"
           upx -t "dist/${NAME}"
           upx -l "dist/${NAME}"
 
