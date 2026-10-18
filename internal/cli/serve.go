@@ -208,8 +208,14 @@ func newServeCmd() *cobra.Command {
 					}
 					return nil
 				case <-reloadCh:
+					if ctx.Err() != nil {
+						continue
+					}
 					reload("SIGHUP")
 				case <-tickerC:
+					if ctx.Err() != nil {
+						continue
+					}
 					reload("subscription interval")
 				}
 			}
