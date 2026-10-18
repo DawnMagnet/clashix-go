@@ -310,8 +310,21 @@ func (m *matcher) bestRealNode(members []C.Proxy) (string, bool) {
 	return closest(m, candidates, 1)[0], true
 }
 
-func warnPlaceholderFallback(pattern, group string, placeholders []string, selected string) {
-	mihomolog.Warnln("node selection %q matched only placeholder nodes in group %q (%s); falling back to real node %q", pattern, group, strings.Join(placeholders, ", "), selected)
+type placeholderFallback struct {
+	group        string
+	placeholders []string
+	selected     string
+}
+
+func warnPlaceholderFallbacks(pattern string, fallbacks []placeholderFallback) {
+	if len(fallbacks) == 0 {
+		return
+	}
+	groups := make([]string, 0, len(fallbacks))
+	for _, fallback := range fallbacks {
+		groups = append(groups, fmt.Sprintf("%s (%s) -> %s", fallback.group, strings.Join(fallback.placeholders, ", "), fallback.selected))
+	}
+	mihomolog.Warnln("node selection %q matched only placeholder nodes; falling back to the best-ranked real nodes in %s", pattern, strings.Join(groups, "; "))
 }
 
 type groupInfo struct {
@@ -487,6 +500,7 @@ func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies
 		selected string
 	}
 	var plans []plan
+	var fallbacks []placeholderFallback
 	matched := 0
 	fallbackMatched := 0
 	for _, info := range groups {
@@ -510,7 +524,7 @@ func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies
 			if selected, ok := spec.patternMatcher.bestRealNode(members); ok {
 				plans = append(plans, plan{group: info.name, selected: selected})
 				fallbackMatched++
-				warnPlaceholderFallback(spec.Pattern, info.name, placeholders, selected)
+				fallbacks = append(fallbacks, placeholderFallback{group: info.name, placeholders: placeholders, selected: selected})
 			}
 			continue
 		}
@@ -525,6 +539,7 @@ func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies
 		message += ungroupedProxyNote(cfg, groups, spec.patternMatcher)
 		return errors.New(message)
 	}
+	warnPlaceholderFallbacks(spec.Pattern, fallbacks)
 
 	for _, plan := range plans {
 		proxy, ok := proxies[plan.group]
@@ -598,7 +613,7 @@ func applyToGroup(spec Spec, groupName string, proxies map[string]C.Proxy, targe
 		if !ok {
 			return fmt.Errorf("no proxy node in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, formatClosest(spec.patternMatcher, proxyMemberCandidates(members), 5))
 		}
-		warnPlaceholderFallback(spec.Pattern, groupName, placeholders, selected)
+		warnPlaceholderFallbacks(spec.Pattern, []placeholderFallback{{group: groupName, placeholders: placeholders, selected: selected}})
 	}
 	if err := setSelected(proxy, selected); err != nil {
 		return fmt.Errorf("select %q in group %q: %w", selected, groupName, err)

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
+	"github.com/metacubex/mihomo/hub/executor"
 	"github.com/sirupsen/logrus"
 )
 
@@ -152,6 +154,97 @@ func TestTunConfigured(t *testing.T) {
 	}
 	if tunConfigured(map[string]any{}) != false {
 		t.Error("tunConfigured reported TUN without a tun section")
+	}
+}
+
+func TestParsedTunAddresses(t *testing.T) {
+	base := func(extraTun, extraTop string) []byte {
+		return []byte(fmt.Sprintf(`tun:
+  enable: true
+  device: cxtun2
+  stack: system
+%s
+%s
+mode: rule
+proxies: []
+rules:
+  - MATCH,DIRECT
+`, extraTun, extraTop))
+	}
+	tests := []struct {
+		name     string
+		extraTun string
+		extraTop string
+		want4    netip.Prefix
+		want6    netip.Prefix
+	}{
+		{
+			name:  "derived IPv4 replaces the mihomo default",
+			want4: config.DeriveTunInet4("cxtun2"),
+			want6: config.DeriveTunInet6("cxtun2"),
+		},
+		{
+			name:     "IPv6 disabled stays empty",
+			extraTop: "ipv6: false\n",
+			want4:    config.DeriveTunInet4("cxtun2"),
+		},
+		{
+			name:     "IPv6 derives when enabled",
+			extraTop: "ipv6: true\n",
+			want4:    config.DeriveTunInet4("cxtun2"),
+			want6:    config.DeriveTunInet6("cxtun2"),
+		},
+		{
+			name:     "custom fake-ip-range wins",
+			extraTop: "dns:\n  enable: true\n  fake-ip-range: 198.18.7.1/16\n",
+			want4:    netip.MustParsePrefix("198.18.7.1/30"),
+			want6:    config.DeriveTunInet6("cxtun2"),
+		},
+		{
+			name:     "explicit IPv6 address wins",
+			extraTun: "  inet6-address: [fd00::9/126]\n",
+			extraTop: "ipv6: true\n",
+			want4:    config.DeriveTunInet4("cxtun2"),
+			want6:    netip.MustParsePrefix("fd00::9/126"),
+		},
+		{
+			name:     "default IPv6 is replaced",
+			extraTun: "  inet6-address: [fdfe:dcba:9876::1/126]\n",
+			extraTop: "ipv6: true\n",
+			want4:    config.DeriveTunInet4("cxtun2"),
+			want6:    config.DeriveTunInet6("cxtun2"),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parsed, err := executor.ParseWithBytes(base(test.extraTun, test.extraTop))
+			if err != nil {
+				t.Fatalf("ParseWithBytes: %v", err)
+			}
+			applyParsedTunAddresses(parsed, explicitTunInet6(base(test.extraTun, test.extraTop)))
+			inet4 := parsed.General.Tun.Inet4Address
+			if len(inet4) != 1 || inet4[0] != test.want4 {
+				t.Errorf("Inet4Address = %v, want [%v]", inet4, test.want4)
+			}
+			inet6 := parsed.General.Tun.Inet6Address
+			if test.want6.IsValid() {
+				if len(inet6) != 1 || inet6[0] != test.want6 {
+					t.Errorf("Inet6Address = %v, want [%v]", inet6, test.want6)
+				}
+			} else if len(inet6) != 0 {
+				t.Errorf("Inet6Address = %v, want none", inet6)
+			}
+		})
+	}
+
+	parsed, err := executor.ParseWithBytes(base("", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed.General.Tun.Device = config.DefaultTunDevice
+	applyParsedTunAddresses(parsed, netip.Prefix{})
+	if got := parsed.General.Tun.Inet4Address; len(got) != 1 || got[0] != config.DefaultTunInet4 {
+		t.Errorf("default device Inet4Address = %v, want [%v]", got, config.DefaultTunInet4)
 	}
 }
 

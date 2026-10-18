@@ -195,6 +195,43 @@ func TestApplyPlaceholderOnlyFallsBackToRankedRealNode(t *testing.T) {
 	}
 }
 
+func TestApplyPlaceholderFallbackWarningSummarizesGroups(t *testing.T) {
+	testProxyMap(t,
+		[]map[string]any{
+			{"name": "Info hk", "type": "ss", "server": "127.0.0.2", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "Info us", "type": "ss", "server": "127.0.0.3", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇭🇰 HK 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 US 01", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy A", "type": "select", "proxies": []any{"Info hk", "🇭🇰 HK 01"}},
+			{"name": "Proxy B", "type": "select", "proxies": []any{"Info us", "🇺🇸 US 01"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy A", "type": "select", "proxies": []any{"Info hk", "🇭🇰 HK 01"}},
+		map[string]any{"name": "Proxy B", "type": "select", "proxies": []any{"Info us", "🇺🇸 US 01"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	var logs strings.Builder
+	oldOutput := logrus.StandardLogger().Out
+	logrus.SetOutput(&logs)
+	defer logrus.SetOutput(oldOutput)
+
+	if err := Apply(cfg, []string{"Info"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := strings.Count(logs.String(), "matched only placeholder nodes"); got != 1 {
+		t.Errorf("placeholder warnings = %d, want one summary: %q", got, logs.String())
+	}
+	for _, want := range []string{"Proxy A", "Proxy B", "placeholder"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("summary warning %q does not mention %q", logs.String(), want)
+		}
+	}
+}
+
 func TestApplyGroupPlaceholderFallback(t *testing.T) {
 	proxyMap := testProxyMap(t,
 		[]map[string]any{

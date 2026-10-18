@@ -316,8 +316,14 @@ func isTunExistsError(detail string) bool {
 // error that mihomo logs instead of returning it. Only TUN-enabled configs pay
 // attention to the log stream.
 func parseMihomoConfig(prepared []byte, watchTun bool) (string, error) {
+	cfg, err := executor.ParseWithBytes(prepared)
+	if err != nil {
+		return "", err
+	}
+	applyParsedTunAddresses(cfg, explicitTunInet6(prepared))
 	if !watchTun {
-		return "", hub.Parse(prepared)
+		hub.ApplyConfig(cfg)
+		return "", nil
 	}
 	sub := mihomolog.Subscribe()
 	tunErrors := make(chan string, 1)
@@ -336,12 +342,7 @@ func parseMihomoConfig(prepared []byte, watchTun bool) (string, error) {
 		}
 	}()
 
-	err := hub.Parse(prepared)
-	if err != nil {
-		mihomolog.UnSubscribe(sub)
-		<-done
-		return "", err
-	}
+	hub.ApplyConfig(cfg)
 	// A successful TUN start (or an unchanged TUN config) is visible in the
 	// listener state without waiting for the log event.
 	if listener.GetTunConf().Enable {

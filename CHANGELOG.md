@@ -69,10 +69,11 @@ All notable changes to this project are documented in this file.
   `iproute2-table-index` and `iproute2-rule-index`. A non-default
   `--tun-device` derives distinct indexes when neither the flags nor the
   config supply them, so a second TUN instance avoids the 2022/9000 conflict.
-- A non-default `--tun-device` also derives a deterministic `tun.inet4-address`
-  /30 from `198.18.0.0/16` (avoiding `198.18.0.1/30`) and, when the config sets
-  `ipv6: true`, an `inet6-address` /126. Explicit config or override
-  `inet4-address`/`inet6-address` values win.
+- A non-default `--tun-device` applies a deterministic IPv4 TUN /30 from
+  `198.18.0.0/16` (avoiding `198.18.0.1/30`) to mihomo's parsed config, because
+  v1.19.32 ignores YAML `tun.inet4-address`. A non-default
+  `dns.fake-ip-range` /30 is kept. IPv6 TUN addressing derives an
+  `inet6-address` /126 while an explicit non-default prefix still wins.
 
 ### Security
 
@@ -206,6 +207,10 @@ All notable changes to this project are documented in this file.
   `external-controller-tls`, `external-controller-unix`, and
   `external-controller-pipe` (unless `--external-controller` is explicit), so
   the panel is not served and the config controller port is not reused.
+- TUN IPv4 address derivation now updates `cfg.General.Tun.Inet4Address` after
+  mihomo parses the config instead of writing a YAML key that v1.19.32 drops.
+  Placeholder fallback warnings are folded into one summary line per selection
+  pattern.
 - Bare protocol selection no longer ranks unrelated `TR 01`/`TR 02` names first;
   exact adapter type matches win.
 

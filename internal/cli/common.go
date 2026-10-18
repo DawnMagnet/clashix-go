@@ -371,14 +371,12 @@ func applyAutoInterfaceForGOOS(goos string, cmd *cobra.Command, mode string, opt
 }
 
 const (
-	defaultTunDevice     = "Meta"
 	defaultTunRouteTable = 2022
 	defaultTunRuleIndex  = 9000
 )
 
 func isDefaultTunDevice(device string) bool {
-	device = strings.TrimSpace(device)
-	return device == "" || strings.EqualFold(device, defaultTunDevice)
+	return config.IsDefaultTunDevice(device)
 }
 
 func tunIndexHash(value string) uint32 {
@@ -399,84 +397,6 @@ func deriveTunIndexes(device string) (table, rule int) {
 		rule++
 	}
 	return table, rule
-}
-
-var defaultTunInet6 = netip.MustParsePrefix("fdfe:dcba:9876::1/126")
-
-// deriveTunInet4 picks a deterministic /30 from 198.18.0.0/16 other than the
-// default 198.18.0.1/30 so two non-default TUN devices do not share an address.
-func deriveTunInet4(device string) netip.Prefix {
-	const subnets = 1 << 14 // number of /30 blocks in a /16
-	index := uint32(tunIndexHash("inet4:"+device) % subnets)
-	if index == 0 {
-		index = 1
-	}
-	last := byte(index&0x3f)<<2 | 1
-	return netip.PrefixFrom(netip.AddrFrom4([4]byte{198, 18, byte(index >> 6), last}), 30)
-}
-
-// deriveTunInet6 picks a deterministic ULA /126 for a non-default device,
-// avoiding mihomo's default fdfe:dcba:9876::1/126.
-func deriveTunInet6(device string) netip.Prefix {
-	high := tunIndexHash("inet6:" + device)
-	low := tunIndexHash("inet6-low:" + device)
-	bytes := [16]byte{
-		0xfd,
-		byte(high >> 24), byte(high >> 16), byte(high >> 8), byte(high),
-		byte(low >> 24), byte(low >> 16), byte(low >> 8),
-		0, 0, 0, 0, 0, 0, 0, 1,
-	}
-	for {
-		prefix := netip.PrefixFrom(netip.AddrFrom16(bytes), 126)
-		if prefix.Masked() != defaultTunInet6.Masked() {
-			return prefix
-		}
-		bytes[14]++
-	}
-}
-
-func tunAddressConfigured(value any) bool {
-	switch value := value.(type) {
-	case string:
-		return strings.TrimSpace(value) != ""
-	case []string:
-		for _, item := range value {
-			if strings.TrimSpace(item) != "" {
-				return true
-			}
-		}
-	case []any:
-		for _, item := range value {
-			if tunAddressConfigured(item) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func ipv6TunEnabled(cfg map[string]any) bool {
-	enabled, _ := cfg["ipv6"].(bool)
-	return enabled
-}
-
-// applyTunAutoAddresses fills inet4-address/inet6-address for a non-default
-// --tun-device unless the config or an override already supplied them.
-func applyTunAutoAddresses(opts *configOptions, cfg map[string]any) {
-	if opts == nil || cfg == nil || !tunEnabled(cfg) || isDefaultTunDevice(opts.tunDevice) {
-		return
-	}
-	tun, ok := cfg["tun"].(map[string]any)
-	if !ok {
-		tun = map[string]any{}
-		cfg["tun"] = tun
-	}
-	if !tunAddressConfigured(tun["inet4-address"]) {
-		tun["inet4-address"] = []any{deriveTunInet4(opts.tunDevice).String()}
-	}
-	if ipv6TunEnabled(cfg) && !tunAddressConfigured(tun["inet6-address"]) {
-		tun["inet6-address"] = []any{deriveTunInet6(opts.tunDevice).String()}
-	}
 }
 
 func tunInt(value any) int {
@@ -640,7 +560,6 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 	config.SetSelectSpecs(base, specs)
 	config.ApplyOverlay(base, overlay)
 	applyTunAutoIndexes(opts, base)
-	applyTunAutoAddresses(opts, base)
 	config.ApplyGeoXDefaults(base)
 	return base, nil
 }
