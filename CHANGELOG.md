@@ -69,6 +69,10 @@ All notable changes to this project are documented in this file.
   `iproute2-table-index` and `iproute2-rule-index`. A non-default
   `--tun-device` derives distinct indexes when neither the flags nor the
   config supply them, so a second TUN instance avoids the 2022/9000 conflict.
+- A non-default `--tun-device` also derives a deterministic `tun.inet4-address`
+  /30 from `198.18.0.0/16` (avoiding `198.18.0.1/30`) and, when the config sets
+  `ipv6: true`, an `inet6-address` /126. Explicit config or override
+  `inet4-address`/`inet6-address` values win.
 
 ### Security
 
@@ -98,7 +102,14 @@ All notable changes to this project are documented in this file.
 - `cx run` binds loopback-only by default (`allow-lan: false`,
   `bind-address: 127.0.0.1`) unless `--allow-lan` is passed.
 - Without an explicit selection, initial select-group nodes skip placeholder and
-  info nodes; groups, `DIRECT`, and `REJECT` are preserved.
+  info nodes; groups, `DIRECT`, and `REJECT` are preserved. Placeholder servers
+  (`10.255.255.255`, `0.0.0.0`, any `127.0.0.0/8`, `::1`, and empty) are also
+  skipped during `--select` matching and ranking. A pattern that matches only
+  placeholders logs a warning and falls back to the best-ranked real node.
+- An explicit `--ui=false` or boolean-like `CX_UI=false` now disables every
+  controller endpoint, not only the panel, so a second instance does not
+  collide on the config's controller port. An explicit `--external-controller`
+  passed together still wins.
 - `cx serve` registers SIGHUP/SIGTERM/SIGINT handlers before loading or fetching
   configuration. A SIGHUP during startup is queued and coalesced into one reload
   after the core is ready; SIGTERM/SIGINT cancel an in-flight fetch and exit
@@ -191,8 +202,10 @@ All notable changes to this project are documented in this file.
   it instead of silently discarding the old payload.
 - TUN `EEXIST`/`file exists` errors now explain the iproute2 table/rule conflict
   and suggest `--tun-route-table`/`--tun-rule-index`.
-- `--ui=false` no longer serves or prints the bundled web panel when a
-  controller from the config remains enabled.
+- `--ui=false`/`CX_UI=false` now clears `external-controller`,
+  `external-controller-tls`, `external-controller-unix`, and
+  `external-controller-pipe` (unless `--external-controller` is explicit), so
+  the panel is not served and the config controller port is not reused.
 - Bare protocol selection no longer ranks unrelated `TR 01`/`TR 02` names first;
   exact adapter type matches win.
 

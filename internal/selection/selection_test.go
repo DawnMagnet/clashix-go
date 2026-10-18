@@ -10,6 +10,7 @@ import (
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/tunnel"
+	"github.com/sirupsen/logrus"
 )
 
 func TestMatcher(t *testing.T) {
@@ -123,13 +124,117 @@ func TestPlaceholderInfo(t *testing.T) {
 		{name: "expire at", address: "198.51.100.10:443", want: true},
 		{name: "reserved server", address: "10.255.255.255:443", want: true},
 		{name: "unspecified server", address: "0.0.0.0:443", want: true},
+		{name: "loopback server", address: "127.0.0.1:443", want: true},
+		{name: "loopback range server", address: "127.255.254.3:443", want: true},
+		{name: "loopback without port", address: "127.0.0.2", want: true},
+		{name: "IPv6 loopback", address: "[::1]:443", want: true},
 		{name: "empty server", address: "", want: true},
 		{name: "normal server", address: "203.0.113.5:8443"},
+		{name: "normal IPv6 server", address: "[2001:db8::1]:443"},
+		{name: "loopback-like address is not loopback", address: "128.0.0.1:443"},
 	}
 	for _, test := range tests {
 		if got := isPlaceholderInfo(test.name, test.address); got != test.want {
 			t.Errorf("isPlaceholderInfo(%q, %q) = %v, want %v", test.name, test.address, got, test.want)
 		}
+	}
+}
+
+func TestApplySkipsPlaceholderMatches(t *testing.T) {
+	proxyMap := testProxyMap(t,
+		[]map[string]any{
+			{"name": "US Info", "type": "ss", "server": "127.0.0.2", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"US Info", "🇺🇸 US 01"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"US Info", "🇺🇸 US 01"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	if err := Apply(cfg, []string{"US"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Proxy"); got != "🇺🇸 US 01" {
+		t.Errorf("selection = %q, want the real US node rather than the placeholder", got)
+	}
+}
+
+func TestApplyPlaceholderOnlyFallsBackToRankedRealNode(t *testing.T) {
+	proxyMap := testProxyMap(t,
+		[]map[string]any{
+			{"name": "Info hk", "type": "ss", "server": "127.0.0.2", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇭🇰 HK 01", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"Info hk", "🇺🇸 US 01", "🇭🇰 HK 01"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"Info hk", "🇺🇸 US 01", "🇭🇰 HK 01"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	var logs strings.Builder
+	oldOutput := logrus.StandardLogger().Out
+	logrus.SetOutput(&logs)
+	defer logrus.SetOutput(oldOutput)
+
+	if err := Apply(cfg, []string{"Info hk"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Proxy"); got != "🇭🇰 HK 01" {
+		t.Errorf("fallback = %q, want the best-ranked real HK node", got)
+	}
+	if !strings.Contains(logs.String(), "placeholder") || !strings.Contains(logs.String(), "🇭🇰 HK 01") {
+		t.Errorf("fallback did not log a placeholder warning: %q", logs.String())
+	}
+}
+
+func TestApplyGroupPlaceholderFallback(t *testing.T) {
+	proxyMap := testProxyMap(t,
+		[]map[string]any{
+			{"name": "Info hk", "type": "ss", "server": "::1", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇭🇰 HK 01", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"Info hk", "🇺🇸 US 01", "🇭🇰 HK 01"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"Info hk", "🇺🇸 US 01", "🇭🇰 HK 01"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	if err := Apply(cfg, []string{"Proxy=Info hk"}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := groupNow(t, proxyMap, "Proxy"); got != "🇭🇰 HK 01" {
+		t.Errorf("group fallback = %q, want the best-ranked real HK node", got)
+	}
+}
+
+func TestApplyPlaceholderOnlyWithoutRealNodeErrors(t *testing.T) {
+	testProxyMap(t,
+		[]map[string]any{
+			{"name": "Info", "type": "ss", "server": "127.0.0.2", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"Info"}},
+		},
+	)
+	cfg := map[string]any{"proxy-groups": []any{
+		map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"Info"}},
+	}}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	if err := Apply(cfg, []string{"Info"}); err == nil || !strings.Contains(err.Error(), "no proxy node") {
+		t.Errorf("Apply error = %v, want the usual no-match error", err)
 	}
 }
 

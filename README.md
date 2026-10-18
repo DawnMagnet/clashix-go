@@ -196,9 +196,12 @@ enabled and the binary was built with `-tags ui`. The boolean `--ui` flag (or a
 boolean-like `CX_UI`, for example `1` or `true`) enables the controller and
 panel. `--ui-addr ADDR` (or `CX_UI_ADDR`) chooses the bind address and implies
 `--ui`; the default is `127.0.0.1:9090`. The login URL is printed at startup.
-An explicit `--ui=false` does not serve or announce the bundled panel, even if
-a controller from the config stays enabled. Panel version, checksum, and MIT
-license are recorded in
+An explicit `--ui=false` (or a boolean-like `CX_UI=false`) also disables the
+controller: it clears `external-controller`, `external-controller-tls`,
+`external-controller-unix`, and `external-controller-pipe`, so a second
+instance never collides on the config's controller port. An explicit
+`--external-controller` passed together still wins. Panel version, checksum,
+and MIT license are recorded in
 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
 
 ```sh
@@ -316,9 +319,12 @@ The flags are `--tun`, `--tun-stack system|gvisor|mixed`, `--tun-device NAME`,
 two map to mihomo's `iproute2-table-index`/`iproute2-rule-index`. With a
 non-default `--tun-device` and no explicit indexes, `cx` derives distinct values
 (avoiding 2022/9000) so a second instance does not collide; an `EEXIST`/`file
-exists` TUN error suggests these flags. On a
-public server, exclude private, loopback, link-local, multicast, broadcast,
-CGNAT, and metadata ranges, and keep local/cloud names out of fake-IP. A
+exists` TUN error suggests these flags. It also derives a deterministic
+`tun.inet4-address` /30 from `198.18.0.0/16` (avoiding the default
+`198.18.0.1/30`) and, when the config sets `ipv6: true`, an `inet6-address`
+/126; explicit `tun.inet4-address`/`tun.inet6-address` values win. On a public
+server, exclude private, loopback, link-local, multicast, broadcast, CGNAT, and
+metadata ranges, and keep local/cloud names out of fake-IP. A
 ready-to-merge fragment with system stack, automatic routing/interface
 detection, those route exclusions, fake-IP, and metadata/local-domain filters is
 in [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml).
@@ -398,10 +404,11 @@ cx run --ui --ui-addr 127.0.0.1:9090 --config direct.yaml -- curl https://exampl
 ```
 
 Run-mode log level defaults to `warning`; core logs are written only to stderr.
-External controller access is disabled unless `--controller ADDR`, `--ui`,
-`--ui-addr ADDR`, or `CX_UI`/`CX_UI_ADDR` is given. `--ui` enables the
-controller and the bundled panel; `--ui-addr` implies `--ui` and defaults to
-`127.0.0.1:9090`. When a controller is enabled and no secret is configured,
+External controller access is disabled unless `--controller ADDR`,
+`--external-controller ADDR`, `--ui`, `--ui-addr ADDR`, or
+`CX_UI`/`CX_UI_ADDR` is given. `--ui` enables the controller and the bundled
+panel; `--ui-addr` implies `--ui` and defaults to `127.0.0.1:9090`. When a
+controller is enabled and no secret is configured,
 `cx run` prints the generated secret only if stderr is a terminal. Otherwise it
 writes `<temp-dir>/controller-secret` (mode `0600`) and logs that path; the
 temporary directory is removed when the command exits.
@@ -665,8 +672,11 @@ cx pack -o cx-private --config config.yaml --select 'Proxy=hy2 us'
 提供。布尔标志 `--ui`（或布尔风格的 `CX_UI`，例如 `1`、`true`）会启用控制器
 和面板。`--ui-addr ADDR`（或 `CX_UI_ADDR`）用于指定监听地址，并隐含启用
 `--ui`；默认地址为 `127.0.0.1:9090`。启动时会打印登录 URL。显式
-`--ui=false` 时不提供也不打印内置面板地址，即使配置中的控制器仍然启用。面板
-版本、校验和与 MIT 许可证记录在 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
+`--ui=false`（或布尔风格的 `CX_UI=false`）也会禁用控制器：清除
+`external-controller`、`external-controller-tls`、`external-controller-unix`
+和 `external-controller-pipe`，避免第二个实例在配置的控制器端口上冲突。同时
+传入显式 `--external-controller` 时仍以该参数为准。面板版本、校验和与 MIT
+许可证记录在 [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
@@ -777,7 +787,10 @@ cx 实例占用，并建议使用 `--tun-device NAME`。重载时打印错误、
 它们优先于配置、覆盖文件和 `tun` 段。后两者对应 mihomo 的
 `iproute2-table-index`/`iproute2-rule-index`。使用非默认 `--tun-device` 且未显式
 指定索引时，`cx` 会派生不同值（避开 2022/9000），避免第二个实例冲突；
-`EEXIST`/`file exists` TUN 错误会提示这两个参数。公网服务器应排除
+`EEXIST`/`file exists` TUN 错误会提示这两个参数。它还会从 `198.18.0.0/16`
+（避开默认 `198.18.0.1/30`）确定性地派生 `tun.inet4-address` /30；若配置设置
+`ipv6: true`，再派生 `inet6-address` /126。显式配置的
+`tun.inet4-address`/`tun.inet6-address` 优先。公网服务器应排除
 私有、loopback、链路本地、组播、广播、CGNAT 和元数据地址段，并让本地/云域名
 不进入 fake-IP。可直接合并的配置片段见
 [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml)，包含
@@ -850,9 +863,10 @@ cx run --ui --ui-addr 127.0.0.1:9090 --config direct.yaml -- curl https://exampl
 ```
 
 `run` 模式日志等级默认为 `warning`，核心日志只写 stderr。除非传入
-`--controller ADDR`、`--ui`、`--ui-addr ADDR` 或设置 `CX_UI`/`CX_UI_ADDR`，
-否则外部控制器关闭。`--ui` 会启用控制器和内置面板；`--ui-addr` 隐含启用
-`--ui`，默认地址为 `127.0.0.1:9090`。启用控制器且未配置 secret 时，只有
+`--controller ADDR`、`--external-controller ADDR`、`--ui`、`--ui-addr ADDR`
+或设置 `CX_UI`/`CX_UI_ADDR`，否则外部控制器关闭。`--ui` 会启用控制器和内置
+面板；`--ui-addr` 隐含启用 `--ui`，默认地址为 `127.0.0.1:9090`。启用控制器且
+未配置 secret 时，只有
 stderr 是终端才会打印生成的 secret；否则写入 `<临时目录>/controller-secret`
 （权限 `0600`）并打印该路径。命令退出时临时目录会被删除。
 

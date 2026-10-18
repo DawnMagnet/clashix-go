@@ -12,6 +12,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
 	C "github.com/metacubex/mihomo/constant"
+	mihomolog "github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 )
 
@@ -274,11 +275,43 @@ func (m *matcher) match(candidates []string) (string, bool) {
 
 func (m *matcher) matchProxy(members []C.Proxy) (string, bool) {
 	for _, member := range members {
+		if isPlaceholder(member) {
+			continue
+		}
 		if m.matchesCandidate(member.Name(), member.Adapter().Type().String()) {
 			return member.Name(), true
 		}
 	}
 	return "", false
+}
+
+// matchPlaceholders returns the placeholder members that match m. Explicit
+// selections use this to warn before falling back to a real node.
+func (m *matcher) matchPlaceholders(members []C.Proxy) []string {
+	var names []string
+	for _, member := range members {
+		if !isPlaceholder(member) {
+			continue
+		}
+		if m.matchesCandidate(member.Name(), member.Adapter().Type().String()) {
+			names = append(names, member.Name())
+		}
+	}
+	return names
+}
+
+// bestRealNode ranks the group's real nodes with the same relevance scoring as
+// selection errors and returns the first one.
+func (m *matcher) bestRealNode(members []C.Proxy) (string, bool) {
+	candidates := proxyMemberCandidates(members)
+	if len(candidates) == 0 {
+		return "", false
+	}
+	return closest(m, candidates, 1)[0], true
+}
+
+func warnPlaceholderFallback(pattern, group string, placeholders []string, selected string) {
+	mihomolog.Warnln("node selection %q matched only placeholder nodes in group %q (%s); falling back to real node %q", pattern, group, strings.Join(placeholders, ", "), selected)
 }
 
 type groupInfo struct {
@@ -455,6 +488,7 @@ func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies
 	}
 	var plans []plan
 	matched := 0
+	fallbackMatched := 0
 	for _, info := range groups {
 		if info.kind != "select" {
 			continue
@@ -472,12 +506,20 @@ func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies
 			matched++
 			continue
 		}
+		if placeholders := spec.patternMatcher.matchPlaceholders(members); len(placeholders) > 0 {
+			if selected, ok := spec.patternMatcher.bestRealNode(members); ok {
+				plans = append(plans, plan{group: info.name, selected: selected})
+				fallbackMatched++
+				warnPlaceholderFallback(spec.Pattern, info.name, placeholders, selected)
+			}
+			continue
+		}
 		if info.name != primary && primary != "" && containsMember(members, primary) {
 			plans = append(plans, plan{group: info.name, selected: primary})
 		}
 	}
 
-	if matched == 0 {
+	if matched == 0 && fallbackMatched == 0 {
 		candidates := proxyCandidates(groups, proxies, "")
 		message := fmt.Sprintf("no proxy node in any select group matches %q; the selection applies to all select groups containing a matching node; closest candidates: %s", spec.Pattern, formatClosest(spec.patternMatcher, candidates, 5))
 		message += ungroupedProxyNote(cfg, groups, spec.patternMatcher)
@@ -548,7 +590,15 @@ func applyToGroup(spec Spec, groupName string, proxies map[string]C.Proxy, targe
 	}
 	selected, ok := spec.patternMatcher.matchProxy(members)
 	if !ok {
-		return fmt.Errorf("no proxy node in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, formatClosest(spec.patternMatcher, proxyMemberCandidates(members), 5))
+		placeholders := spec.patternMatcher.matchPlaceholders(members)
+		if len(placeholders) == 0 {
+			return fmt.Errorf("no proxy node in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, formatClosest(spec.patternMatcher, proxyMemberCandidates(members), 5))
+		}
+		selected, ok = spec.patternMatcher.bestRealNode(members)
+		if !ok {
+			return fmt.Errorf("no proxy node in group %q matches %q; closest candidates: %s", groupName, spec.Pattern, formatClosest(spec.patternMatcher, proxyMemberCandidates(members), 5))
+		}
+		warnPlaceholderFallback(spec.Pattern, groupName, placeholders, selected)
 	}
 	if err := setSelected(proxy, selected); err != nil {
 		return fmt.Errorf("select %q in group %q: %w", selected, groupName, err)
@@ -678,14 +728,6 @@ func applyPlaceholderDefaults(cfg map[string]any, targeted map[string]bool) erro
 	return nil
 }
 
-var placeholderServers = map[string]struct{}{
-	"":               {},
-	"10.255.255.255": {},
-	"0.0.0.0":        {},
-	"127.0.0.1":      {},
-	"::1":            {},
-}
-
 var placeholderNames = []string{
 	"剩余流量",
 	"套餐到期",
@@ -712,12 +754,7 @@ func isPlaceholder(proxy C.Proxy) bool {
 }
 
 func isPlaceholderInfo(name, address string) bool {
-	host := address
-	if parsedHost, _, err := net.SplitHostPort(address); err == nil {
-		host = parsedHost
-	}
-	host = strings.Trim(host, "[]")
-	if _, placeholder := placeholderServers[host]; placeholder {
+	if isPlaceholderServer(address) {
 		return true
 	}
 	lower := strings.ToLower(name)
@@ -727,6 +764,28 @@ func isPlaceholderInfo(name, address string) bool {
 		}
 	}
 	return false
+}
+
+// isPlaceholderServer reports whether address is empty or uses a server that
+// only exists as a subscription info/placeholder row.
+func isPlaceholderServer(address string) bool {
+	host := strings.TrimSpace(address)
+	if host == "" {
+		return true
+	}
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if host == "" {
+		return true
+	}
+	switch host {
+	case "10.255.255.255", "0.0.0.0":
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type nodeCandidate struct {

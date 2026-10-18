@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -602,6 +603,80 @@ func TestServeUIDisabledDoesNotLogPanel(t *testing.T) {
 		if _, exists := lastFakeCore.config["external-ui"]; exists {
 			t.Errorf("--ui=false injected external-ui: %#v", lastFakeCore.config["external-ui"])
 		}
+		if got := lastFakeCore.config["external-controller"]; got != "" {
+			t.Errorf("--ui=false kept external-controller = %v, want disabled", got)
+		}
+	}
+}
+
+func TestServeUIDisabledClearsControllerEndpoints(t *testing.T) {
+	tests := []struct {
+		name           string
+		env            map[string]string
+		args           []string
+		wantController string
+	}{
+		{name: "false flag", args: []string{"--ui=false"}},
+		{name: "false environment", env: map[string]string{"CX_UI": "false"}},
+		{
+			name:           "explicit external controller wins",
+			args:           []string{"--ui=false", "--external-controller", "127.0.0.1:18081"},
+			wantController: "127.0.0.1:18081",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			useFakeCore(t)
+			t.Setenv("CX_UI", "")
+			t.Setenv("CX_UI_ADDR", "")
+			for key, value := range test.env {
+				t.Setenv(key, value)
+			}
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.yaml")
+			content := `mixed-port: 0
+external-controller: 127.0.0.1:18080
+external-controller-tls: 127.0.0.1:18443
+external-controller-unix: /tmp/cx.sock
+external-controller-pipe: \\.\pipe\cx
+mode: rule
+proxies: []
+rules:
+  - MATCH,DIRECT
+`
+			if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				cancel()
+			}()
+			root := NewRoot("dev")
+			var stderr strings.Builder
+			root.SetErr(&stderr)
+			root.SetContext(ctx)
+			args := []string{"serve", "--config", configPath, "--dir", t.TempDir()}
+			args = append(args, test.args...)
+			root.SetArgs(args)
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if lastFakeCore == nil || lastFakeCore.config == nil {
+				t.Fatal("core did not receive a configuration")
+			}
+			if got := lastFakeCore.config["external-controller"]; got != test.wantController {
+				t.Errorf("external-controller = %v, want %q", got, test.wantController)
+			}
+			for _, key := range []string{"external-controller-tls", "external-controller-unix", "external-controller-pipe"} {
+				if _, exists := lastFakeCore.config[key]; exists {
+					t.Errorf("kept disabled controller key %q", key)
+				}
+			}
+			if strings.Contains(stderr.String(), "web panel:") {
+				t.Errorf("disabled UI printed a panel URL: %q", stderr.String())
+			}
+		})
 	}
 }
 
@@ -1043,6 +1118,24 @@ rules:
 	}
 }
 
+func TestRunExternalControllerWinsOverDisabledUI(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	root := NewRoot("dev")
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--ui=false", "--external-controller", "127.0.0.1:18082", "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil || lastFakeCore.config == nil {
+		t.Fatal("core did not receive a configuration")
+	}
+	if got := lastFakeCore.config["external-controller"]; got != "127.0.0.1:18082" {
+		t.Errorf("external-controller = %v, want the explicit address", got)
+	}
+}
+
 func TestRunTunFlagOverlay(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell test uses sh")
@@ -1130,6 +1223,119 @@ func TestTunIndexFlagsAndAutoDerive(t *testing.T) {
 	tun = cfg["tun"].(map[string]any)
 	if _, exists := tun["iproute2-table-index"]; exists {
 		t.Errorf("default device derived an index: %#v", tun)
+	}
+}
+
+func TestTunAddressAutoDerive(t *testing.T) {
+	newOptions := func(args ...string) (*cobra.Command, *configOptions) {
+		cmd := &cobra.Command{}
+		opts := &configOptions{}
+		addTunFlags(cmd, opts)
+		if err := cmd.ParseFlags(args); err != nil {
+			t.Fatal(err)
+		}
+		if err := opts.validateTun(cmd); err != nil {
+			t.Fatal(err)
+		}
+		return cmd, opts
+	}
+	apply := func(args ...string) map[string]any {
+		cmd, opts := newOptions(args...)
+		cfg := map[string]any{}
+		config.ApplyOverlay(cfg, opts.overlay(cmd))
+		applyTunAutoIndexes(opts, cfg)
+		applyTunAutoAddresses(opts, cfg)
+		tun, ok := cfg["tun"].(map[string]any)
+		if !ok {
+			t.Fatalf("tun config = %#v", cfg["tun"])
+		}
+		return tun
+	}
+	prefixes := func(t *testing.T, value any) []netip.Prefix {
+		t.Helper()
+		items, ok := value.([]any)
+		if !ok {
+			t.Fatalf("address list = %#v, want []any", value)
+		}
+		out := make([]netip.Prefix, 0, len(items))
+		for _, item := range items {
+			text, ok := item.(string)
+			if !ok {
+				t.Fatalf("address = %#v, want string", item)
+			}
+			prefix, err := netip.ParsePrefix(text)
+			if err != nil {
+				t.Fatalf("parse address %q: %v", text, err)
+			}
+			out = append(out, prefix)
+		}
+		return out
+	}
+
+	tun := apply("--tun", "--tun-device", "cxtun9")
+	inet4 := prefixes(t, tun["inet4-address"])
+	if len(inet4) != 1 || inet4[0].Bits() != 30 || !inet4[0].Addr().Is4() {
+		t.Fatalf("inet4-address = %v, want one IPv4 /30", inet4)
+	}
+	if !netip.MustParsePrefix("198.18.0.0/16").Contains(inet4[0].Addr()) {
+		t.Errorf("inet4-address = %v, want an address in 198.18.0.0/16", inet4[0])
+	}
+	if inet4[0].Masked() == netip.MustParsePrefix("198.18.0.1/30").Masked() {
+		t.Errorf("inet4-address = %v reused the default /30", inet4[0])
+	}
+	if _, exists := tun["inet6-address"]; exists {
+		t.Errorf("derived inet6-address without ipv6 enabled: %#v", tun["inet6-address"])
+	}
+
+	again := apply("--tun", "--tun-device", "cxtun9")
+	if got, want := prefixes(t, again["inet4-address"])[0], inet4[0]; got != want {
+		t.Errorf("derived address is not deterministic: %v != %v", got, want)
+	}
+	other := apply("--tun", "--tun-device", "cxtun10")
+	if got := prefixes(t, other["inet4-address"])[0]; got == inet4[0] {
+		t.Errorf("different devices derived the same inet4-address %v", got)
+	}
+
+	cmd, opts := newOptions("--tun", "--tun-device", "cxtun9")
+	ipv6Cfg := map[string]any{"ipv6": true}
+	config.ApplyOverlay(ipv6Cfg, opts.overlay(cmd))
+	applyTunAutoIndexes(opts, ipv6Cfg)
+	applyTunAutoAddresses(opts, ipv6Cfg)
+	ipv6Tun := ipv6Cfg["tun"].(map[string]any)
+	inet6 := prefixes(t, ipv6Tun["inet6-address"])
+	if len(inet6) != 1 || inet6[0].Bits() != 126 || !inet6[0].Addr().Is6() {
+		t.Fatalf("inet6-address = %v, want one IPv6 /126", inet6)
+	}
+	if inet6[0].Masked() == netip.MustParsePrefix("fdfe:dcba:9876::1/126").Masked() {
+		t.Errorf("inet6-address = %v reused the default /126", inet6[0])
+	}
+
+	explicit4 := "198.18.9.9/30"
+	explicit6 := "fd00::9/126"
+	explicitCfg := map[string]any{
+		"ipv6": true,
+		"tun": map[string]any{
+			"enable":        true,
+			"inet4-address": []any{explicit4},
+			"inet6-address": []any{explicit6},
+		},
+	}
+	cmd, opts = newOptions("--tun", "--tun-device", "cxtun9")
+	config.ApplyOverlay(explicitCfg, opts.overlay(cmd))
+	applyTunAutoAddresses(opts, explicitCfg)
+	explicitTun := explicitCfg["tun"].(map[string]any)
+	if got := prefixes(t, explicitTun["inet4-address"])[0]; got != netip.MustParsePrefix(explicit4) {
+		t.Errorf("explicit inet4-address was overwritten: %v", got)
+	}
+	if got := prefixes(t, explicitTun["inet6-address"])[0]; got != netip.MustParsePrefix(explicit6) {
+		t.Errorf("explicit inet6-address was overwritten: %v", got)
+	}
+
+	tun = apply("--tun", "--tun-device", "Meta")
+	for _, key := range []string{"inet4-address", "inet6-address"} {
+		if _, exists := tun[key]; exists {
+			t.Errorf("default device derived %s: %#v", key, tun[key])
+		}
 	}
 }
 

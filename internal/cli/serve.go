@@ -77,7 +77,10 @@ func newServeCmd() *cobra.Command {
 			if uiSet {
 				overlay.ExternalController = config.StringPtr(resolvedUI)
 			}
-			uiDisabled := cmd.Flags().Changed("ui") && !ui && !cmd.Flags().Changed("ui-addr")
+			uiDisabled := uiExplicitlyDisabled(cmd, ui)
+			if uiDisabled && !cmd.Flags().Changed("external-controller") {
+				overlay.ExternalController = config.StringPtr("")
+			}
 
 			notifier := notify.New()
 			defer notifier.Close()
@@ -108,6 +111,9 @@ func newServeCmd() *cobra.Command {
 			}
 			if ctx.Err() != nil {
 				return nil
+			}
+			if uiDisabled {
+				clearControllerEndpoints(cfg, cmd.Flags().Changed("external-controller"))
 			}
 			autoInterface := applyAutoInterface(cmd, "serve", &opts, cfg)
 			warnInsecureController(cmd, "serve", cfg)
@@ -173,6 +179,9 @@ func newServeCmd() *cobra.Command {
 					return false
 				}
 				newCfg := result.cfg
+				if uiDisabled {
+					clearControllerEndpoints(newCfg, cmd.Flags().Changed("external-controller"))
+				}
 				newAutoInterface := applyAutoInterface(cmd, "serve", &opts, newCfg)
 				warnInsecureController(cmd, "serve", newCfg)
 				newSecret, err := ensureServeControllerSecret(cmd, stateDir, newCfg, secret)
@@ -354,6 +363,9 @@ func newRunCmd() *cobra.Command {
 			}
 			if uiSet {
 				controller = resolvedUI
+			}
+			if cmd.Flags().Changed("external-controller") && !cmd.Flags().Changed("controller") {
+				controller = opts.externalController
 			}
 			logLevel := "warning"
 			if cmd.Flags().Changed("log-level") {
@@ -611,6 +623,35 @@ func ensureControllerSecret(cfg map[string]any, fallback string) (string, bool, 
 
 func logControllerSecret(cmd *cobra.Command, mode, secret string) {
 	fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: generated controller secret: %s\n", mode, secret)
+}
+
+func uiExplicitlyDisabled(cmd *cobra.Command, enabled bool) bool {
+	// --ui-addr always implies --ui, including when --ui=false is passed.
+	if cmd.Flags().Changed("ui-addr") {
+		return false
+	}
+	if cmd.Flags().Changed("ui") {
+		return !enabled
+	}
+	if value := strings.TrimSpace(os.Getenv("CX_UI")); value != "" {
+		on, _ := parseUIEnv(value)
+		return !on
+	}
+	return false
+}
+
+// clearControllerEndpoints removes every controller endpoint. An explicitly
+// passed --external-controller keeps only the main endpoint.
+func clearControllerEndpoints(cfg map[string]any, keepMain bool) {
+	if cfg == nil {
+		return
+	}
+	if !keepMain {
+		cfg["external-controller"] = ""
+	}
+	delete(cfg, "external-controller-tls")
+	delete(cfg, "external-controller-unix")
+	delete(cfg, "external-controller-pipe")
 }
 
 func resolveUI(cmd *cobra.Command, enabled bool, address string) (string, bool) {
