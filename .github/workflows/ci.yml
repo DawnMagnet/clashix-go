@@ -2,7 +2,14 @@ name: CI
 
 on:
   push:
+    branches: ["**"]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -20,12 +27,28 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+          cache-dependency-path: go.sum
+
+      - name: Cache Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-check-linux-amd64-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: gobuild-check-linux-amd64-${{ hashFiles('go.sum') }}-
+
+      - name: Cache web panel assets
+        id: ui-cache
+        uses: actions/cache@v4
+        with:
+          path: internal/ui/dist
+          key: ui-${{ hashFiles('scripts/fetch-ui.sh') }}
 
       - name: Fetch web panel assets
+        if: steps.ui-cache.outputs.cache-hit != 'true'
         run: ./scripts/fetch-ui.sh
 
       - name: Check formatting
-        run: test -z "$(gofmt -l .)"
+        run: test -z "$(gofmt -l $(git ls-files '*.go'))"
 
       - name: Vet
         run: go vet -tags "with_gvisor no_zerotier no_easytier no_tailscale" ./...
@@ -102,8 +125,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Cache Go build cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-build
+          key: gobuild-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: gobuild-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('go.sum') }}-
+
+      - name: Cache web panel assets
+        id: ui-cache
+        uses: actions/cache@v4
+        with:
+          path: internal/ui/dist
+          key: ui-${{ hashFiles('scripts/fetch-ui.sh') }}
+
       - name: Fetch web panel assets
+        if: steps.ui-cache.outputs.cache-hit != 'true'
         run: ./scripts/fetch-ui.sh
 
+      # Same flags as release.yml so the tag build reuses this build cache.
       - name: Build
-        run: go build -tags "ui with_gvisor no_zerotier no_easytier no_tailscale" ./...
+        run: go build -tags "ui with_gvisor no_zerotier no_easytier no_tailscale" -trimpath -ldflags "-s -w" -o /dev/null ./cmd/cx
