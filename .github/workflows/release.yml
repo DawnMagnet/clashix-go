@@ -105,7 +105,7 @@ jobs:
           NAME: ${{ steps.build.outputs.name }}
         run: |
           set -euo pipefail
-          upx --best --lzma -q "dist/${NAME}"
+          upx --best -q "dist/${NAME}"
           upx -t "dist/${NAME}"
           upx -l "dist/${NAME}"
 

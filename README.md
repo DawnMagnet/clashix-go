@@ -19,7 +19,7 @@ Releases contain bare binaries plus `SHA256SUMS`:
 `cx-freebsd-amd64`, `cx-freebsd-arm64`, and `SHA256SUMS`.
 
 Linux (`amd64`, `arm64`, `armv7`) and Windows (`amd64`, `arm64`) release
-binaries are compressed with UPX 5.2.1 (`--best --lzma`). macOS and FreeBSD
+binaries are compressed with UPX 5.2.1 (`--best`). macOS and FreeBSD
 artifacts are not compressed. To get an uncompressed binary, run
 `upx -d cx-linux-amd64` with UPX 5.2.1 (or build from source below); `upx -d`
 restores the executable from before compression. Packed binaries with an
@@ -487,7 +487,7 @@ tags plus `-trimpath -ldflags "-s -w -X main.version=<tag>"`.
 
 Tagged releases then install pinned UPX 5.2.1 (verified against a hard-coded
 SHA-256), compress the Linux `amd64`/`arm64`/`armv7` and Windows
-`amd64`/`arm64` artifacts with `--best --lzma`, and run `upx -t` on each one
+`amd64`/`arm64` artifacts with `--best`, and run `upx -t` on each one
 before generating `SHA256SUMS`. Darwin is left uncompressed because UPX changes
 the Mach-O layout and can interfere with codesigning; FreeBSD `amd64`/`arm64`
 is skipped because UPX 5.2.1 only supports FreeBSD `i386`. `cx pack` keeps the
@@ -510,7 +510,7 @@ Release 提供裸二进制文件和 `SHA256SUMS`：
 `cx-freebsd-amd64`、`cx-freebsd-arm64` 和 `SHA256SUMS`。
 
 Linux（`amd64`、`arm64`、`armv7`）和 Windows（`amd64`、`arm64`）发布二进制使用
-UPX 5.2.1（`--best --lzma`）压缩；macOS 与 FreeBSD 产物不压缩。要获得未压缩
+UPX 5.2.1（`--best`）压缩；macOS 与 FreeBSD 产物不压缩。要获得未压缩
 二进制，可使用 UPX 5.2.1 执行 `upx -d cx-linux-amd64`（或按下文从源码构建）；
 `upx -d` 会还原压缩前的可执行文件。带内嵌配置的打包产物不会使用 UPX 压缩。
 UPX 以每次启动时的解压延迟换取更小的下载体积；若在意启动延迟，可使用
@@ -928,7 +928,7 @@ CI 覆盖 Linux、macOS、Windows 测试，以及 linux/darwin/windows/freebsd
 还使用 `-trimpath -ldflags "-s -w -X main.version=<tag>"`。
 
 打 tag 发布时还会安装固定版本 UPX 5.2.1（使用硬编码 SHA-256 校验），对 Linux
-`amd64`/`arm64`/`armv7` 与 Windows `amd64`/`arm64` 产物使用 `--best --lzma`
+`amd64`/`arm64`/`armv7` 与 Windows `amd64`/`arm64` 产物使用 `--best`
 压缩，并在生成 `SHA256SUMS` 前对每个产物执行 `upx -t`。Darwin 不压缩，因为
 UPX 会改变 Mach-O 布局，可能影响代码签名；FreeBSD `amd64`/`arm64` 跳过，
 因为 UPX 5.2.1 仅支持 FreeBSD `i386`。`cx pack` 产物保持上游二进制不变，
