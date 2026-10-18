@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/sirupsen/logrus"
 )
 
@@ -44,6 +45,58 @@ func TestValidateOnlyLogsWarningsAndErrors(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "level=info") {
 		t.Errorf("validation emitted info logs: %s", logs.String())
+	}
+}
+
+func TestTunExampleMergesAndValidates(t *testing.T) {
+	base := map[string]any{
+		"mixed-port": 0,
+		"mode":       "rule",
+		"proxies":    []any{},
+		"rules":      []any{"MATCH,DIRECT"},
+	}
+	override, ok, err := config.LoadOverride(filepath.Join("..", "..", "examples", "override-tun-server.yaml"), false)
+	if err != nil || !ok {
+		t.Fatalf("LoadOverride = %v, %v", ok, err)
+	}
+	merged := config.MergeOverride(base, override)
+	data, err := config.Marshal(merged)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if err := Validate(t.TempDir(), data); err != nil {
+		t.Fatalf("Validate TUN example: %v", err)
+	}
+	tun, ok := merged["tun"].(map[string]any)
+	if !ok {
+		t.Fatalf("tun = %#v", merged["tun"])
+	}
+	if tun["enable"] != true || tun["stack"] != "system" || tun["auto-route"] != true || tun["auto-detect-interface"] != true {
+		t.Errorf("tun = %#v", tun)
+	}
+	routes, ok := tun["route-exclude-address"].([]any)
+	if !ok || len(routes) != 7 {
+		t.Errorf("route-exclude-address = %#v", tun["route-exclude-address"])
+	}
+	dns, ok := merged["dns"].(map[string]any)
+	if !ok || dns["enable"] != true || dns["enhanced-mode"] != "fake-ip" {
+		t.Errorf("dns = %#v", merged["dns"])
+	}
+	filters, ok := dns["fake-ip-filter"].([]any)
+	if !ok || len(filters) == 0 {
+		t.Errorf("fake-ip-filter = %#v", dns["fake-ip-filter"])
+	}
+}
+
+func TestTunConfigured(t *testing.T) {
+	if tunConfigured(map[string]any{"tun": map[string]any{"enable": true}}) != true {
+		t.Error("tunConfigured missed an enabled TUN")
+	}
+	if tunConfigured(map[string]any{"tun": map[string]any{"enable": false}}) != false {
+		t.Error("tunConfigured reported a disabled TUN")
+	}
+	if tunConfigured(map[string]any{}) != false {
+		t.Error("tunConfigured reported TUN without a tun section")
 	}
 }
 

@@ -23,6 +23,15 @@ All notable changes to this project are documented in this file.
 - `cx version` falls back to Go build information when the release version is
   not injected: the module version when available, otherwise the 12-character
   VCS revision with `-dirty` when the worktree was modified.
+- `serve` and `run` accept `--tun`, `--tun-stack system|gvisor|mixed`, and
+  repeatable `--tun-exclude CIDR`. They override `tun.enable`, `tun.stack`,
+  `tun.auto-route`, `tun.auto-detect-interface`, and
+  `tun.route-exclude-address`; CIDRs are validated before startup.
+- All CI, release, and documented builds now include the `with_gvisor` mihomo
+  tag so the gVisor and mixed TUN stacks are available.
+- Added `examples/override-tun-server.yaml` with the system stack, automatic
+  routing/interface detection, private/metadata route exclusions, fake-IP, and
+  local/cloud fake-IP filters.
 - The systemd unit now has `ExecReload=/bin/kill -HUP $MAINPID`,
   `EnvironmentFile=-/etc/cx/cx.env`, `LimitNOFILE=1048576`, and proxy-only
   hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
@@ -58,6 +67,12 @@ All notable changes to this project are documented in this file.
   are no longer over-redacted.
 - Boolean flag help documents explicit forms such as `--allow-lan=false` and
   `--ui=false`.
+- `cx serve` now verifies mihomo's in-process TUN state after startup and after
+  every reload. A requested TUN that fails to start makes startup exit non-zero;
+  a failed TUN reload logs the error, re-applies the previous working config, and
+  keeps serving.
+- The systemd unit uses `Restart=always`; the launchd agent uses
+  `KeepAlive=true`. Both retain reload support.
 - Normal `run`/`serve` shutdown suppresses mihomo's "Mihomo shutting down"
   warning. A shutdown reparse optimization was deliberately skipped.
 - `sub update` and config validation emit warning+ mihomo logs only.
@@ -70,12 +85,20 @@ All notable changes to this project are documented in this file.
   false` and unused ports `0`, controller/panel on `127.0.0.1:9090` with a
   secret, and `--sub-file`/`CX_SUB` supplied through `/etc/cx/cx.env`. The docs
   warn that subscriptions may set `allow-lan: true` and must not be trusted.
+- Documented TUN requirements (root or `CAP_NET_ADMIN`, plus
+  `CAP_NET_BIND_SERVICE` for DNS port 53), systemd capability/device settings,
+  public-server route exclusions, fake-IP filtering for local/cloud domains, and
+  the `with_gvisor` build tag.
+- Added an operations note that `systemd-run --on-active=...` timers restart
+  their countdown after `systemctl daemon-reload`.
 
 ### Fixed
 
 - SIGHUP received during `cx serve` startup no longer kills the process through
   Go's default signal action; systemd now sees a live service and can apply the
   queued reload.
+- TUN startup failures are no longer silent: the core checks mihomo's listener
+  state and reports `mihomo TUN inbound did not start` with remediation hints.
 - Node-selection errors no longer say "primary group X"; they describe the
   all-select-groups behavior and list real proxy nodes instead of groups,
   `DIRECT`, or `REJECT`.

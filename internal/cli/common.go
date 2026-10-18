@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -47,6 +48,9 @@ type configOptions struct {
 	redirPort          int
 	tproxyPort         int
 	allowLAN           bool
+	tun                bool
+	tunStack           string
+	tunExclude         []string
 	mode               string
 	logLevel           string
 	externalController string
@@ -74,6 +78,13 @@ func addConfigFlags(cmd *cobra.Command, opts *configOptions) {
 	flags.StringVar(&opts.logLevel, "log-level", "", "override the log level")
 	flags.StringVar(&opts.externalController, "external-controller", "", "override the controller address")
 	flags.StringVar(&opts.secret, "secret", "", "override the controller secret")
+}
+
+func addTunFlags(cmd *cobra.Command, opts *configOptions) {
+	flags := cmd.Flags()
+	flags.BoolVar(&opts.tun, "tun", false, "enable TUN (--tun=false disables it)")
+	flags.StringVar(&opts.tunStack, "tun-stack", "", "TUN stack: system, gvisor, or mixed (requires --tun)")
+	flags.StringArrayVar(&opts.tunExclude, "tun-exclude", nil, "exclude CIDR from TUN routes (repeatable; requires --tun)")
 }
 
 func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
@@ -111,6 +122,15 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	} else if secret := os.Getenv("CX_SECRET"); secret != "" {
 		overlay.Secret = config.StringPtr(secret)
 	}
+	if changed("tun") {
+		overlay.TunEnable = config.BoolPtr(opts.tun)
+	}
+	if changed("tun-stack") {
+		overlay.TunStack = config.StringPtr(opts.tunStack)
+	}
+	if changed("tun-exclude") {
+		overlay.TunExcludeRoutes = append([]string(nil), opts.tunExclude...)
+	}
 	return overlay
 }
 
@@ -118,6 +138,34 @@ func addUIFlag(cmd *cobra.Command, enabled *bool, address *string) {
 	flags := cmd.Flags()
 	flags.BoolVar(enabled, "ui", false, "enable the controller and web panel (--ui=false disables it)")
 	flags.StringVar(address, "ui-addr", defaultUIAddress, "controller and web panel address (implies --ui)")
+}
+
+func (opts *configOptions) validateTun(cmd *cobra.Command) error {
+	changed := cmd.Flags().Changed
+	if changed("tun-stack") {
+		stack := strings.ToLower(strings.TrimSpace(opts.tunStack))
+		switch stack {
+		case "system", "gvisor", "mixed":
+			opts.tunStack = stack
+		default:
+			return fmt.Errorf("--tun-stack must be system, gvisor, or mixed")
+		}
+	}
+	if changed("tun-exclude") {
+		if len(opts.tunExclude) == 0 {
+			return fmt.Errorf("--tun-exclude requires at least one CIDR")
+		}
+		routes := make([]string, 0, len(opts.tunExclude))
+		for _, raw := range opts.tunExclude {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+			if err != nil {
+				return fmt.Errorf("--tun-exclude %q is not a CIDR: %w", raw, err)
+			}
+			routes = append(routes, prefix.String())
+		}
+		opts.tunExclude = routes
+	}
+	return nil
 }
 
 func (opts *configOptions) validatePorts(cmd *cobra.Command) error {

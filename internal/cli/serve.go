@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -48,6 +49,9 @@ func newServeCmd() *cobra.Command {
 			}
 
 			if err := opts.validatePorts(cmd); err != nil {
+				return err
+			}
+			if err := opts.validateTun(cmd); err != nil {
 				return err
 			}
 			if err := opts.prepare(cmd); err != nil {
@@ -110,6 +114,7 @@ func newServeCmd() *cobra.Command {
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: configuration active in %s\n", stateDir)
 			logPanelURL(cmd, "serve", panelURL)
+			lastGoodData := append([]byte(nil), data...)
 
 			reload := func(reason string) {
 				reloadOverlay := opts.overlay(cmd)
@@ -155,8 +160,18 @@ func newServeCmd() *cobra.Command {
 				}
 				if err := applier.Apply(stateDir, newData); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) apply failed: %v\n", reason, err)
+					if errors.Is(err, core.ErrTunNotStarted) {
+						if rollbackErr := applier.Apply(stateDir, lastGoodData); rollbackErr != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback failed: %v\n", reason, rollbackErr)
+						} else if saveErr := config.WriteYAML(configPath, lastGoodData); saveErr != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback could not restore %s: %v\n", reason, configPath, saveErr)
+						} else {
+							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) rolled back to previous working configuration\n", reason)
+						}
+					}
 					return
 				}
+				lastGoodData = append([]byte(nil), newData...)
 				secret = newSecret
 				if newPanelURL != "" && newPanelURL != panelURL {
 					panelURL = newPanelURL
@@ -192,6 +207,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().StringVar(&dir, "dir", "", "state directory (default: user config directory/cx)")
 	cmd.Flags().DurationVar(&subInterval, "sub-interval", 0, "periodically refresh subscriptions and reload")
 	addUIFlag(cmd, &ui, &uiAddr)
+	addTunFlags(cmd, &opts)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
@@ -211,6 +227,9 @@ func newRunCmd() *cobra.Command {
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := opts.validatePorts(cmd); err != nil {
+				return err
+			}
+			if err := opts.validateTun(cmd); err != nil {
 				return err
 			}
 			if err := opts.prepare(cmd); err != nil {
@@ -337,6 +356,7 @@ func newRunCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&controller, "controller", "", "external controller address (disabled when empty)")
 	addUIFlag(cmd, &ui, &uiAddr)
+	addTunFlags(cmd, &opts)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub"
 	"github.com/metacubex/mihomo/hub/executor"
+	"github.com/metacubex/mihomo/listener"
 	mihomolog "github.com/metacubex/mihomo/log"
 	"github.com/sirupsen/logrus"
 )
@@ -40,6 +41,10 @@ type Applier interface {
 // ErrAlreadyStarted is returned because mihomo keeps process-global state and
 // can only be started once per process.
 var ErrAlreadyStarted = errors.New("mihomo core already started in this process")
+
+// ErrTunNotStarted reports that tun.enable was requested but mihomo did not
+// bring up its TUN inbound.
+var ErrTunNotStarted = errors.New("mihomo TUN inbound did not start")
 
 var (
 	processMu      sync.Mutex
@@ -177,6 +182,10 @@ func (m *Mihomo) startLocked(ctx context.Context, dir string, cfg []byte) error 
 	if err := hub.Parse(prepared); err != nil {
 		return fmt.Errorf("start mihomo core: %w", err)
 	}
+	if err := checkTun(parsed); err != nil {
+		_ = shutdownCore()
+		return err
+	}
 	if err := selection.Apply(parsed, specs); err != nil {
 		_ = shutdownCore()
 		return fmt.Errorf("apply node selection: %w", err)
@@ -212,6 +221,9 @@ func (m *Mihomo) Apply(dir string, cfg []byte) error {
 	if err := hub.Parse(prepared); err != nil {
 		return fmt.Errorf("apply mihomo config: %w", err)
 	}
+	if err := checkTun(parsed); err != nil {
+		return err
+	}
 	if err := selection.Apply(parsed, specs); err != nil {
 		return fmt.Errorf("apply node selection: %w", err)
 	}
@@ -228,6 +240,35 @@ func (m *Mihomo) Stop() error {
 	}
 	m.started = false
 	return shutdownCore()
+}
+
+func tunConfigured(cfg map[string]any) bool {
+	tun, ok := cfg["tun"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, _ := tun["enable"].(bool)
+	return enabled
+}
+
+func tunStack(cfg map[string]any) string {
+	tun, ok := cfg["tun"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	stack, _ := tun["stack"].(string)
+	return stack
+}
+
+func checkTun(cfg map[string]any) error {
+	if !tunConfigured(cfg) || listener.GetTunConf().Enable {
+		return nil
+	}
+	stack := tunStack(cfg)
+	if stack == "" {
+		stack = "unknown"
+	}
+	return fmt.Errorf("%w (stack %s): run as root or grant CAP_NET_ADMIN, ensure /dev/net/tun is available, and build with the with_gvisor tag for the gvisor/mixed stacks", ErrTunNotStarted, stack)
 }
 
 func shutdownCore() error {

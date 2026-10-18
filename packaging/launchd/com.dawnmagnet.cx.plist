@@ -6,7 +6,7 @@
 	     EnvironmentFile. Reload with:
 	     launchctl kill SIGHUP gui/$(id -u)/com.dawnmagnet.cx
 	     Put environment variables in EnvironmentVariables or a wrapper.
-	     KeepAlive below is the Restart=on-failure equivalent, and
+	     KeepAlive below is the Restart=always equivalent, and
 	     ThrottleInterval is the RestartSec equivalent. -->
 	<key>Label</key>
 	<string>com.dawnmagnet.cx</string>
@@ -18,10 +18,7 @@
 	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
+	<true/>
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 	<key>ProcessType</key>

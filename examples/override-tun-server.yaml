@@ -1,0 +1,32 @@
+# TUN example for a public server. Merge this over your base config with
+#   cx serve --override examples/override-tun-server.yaml --tun
+# or place it in the state directory as override.yaml.
+tun:
+  enable: true
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  route-exclude-address:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+    - fc00::/7
+    - fe80::/10
+
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "+.localhost"
+    - "+.internal"
+    - localhost
+    - metadata.google.internal
+    - metadata.tencentyun.com
+    - metadata.aliyun.com
+    - "+.aliyuncs.com"
+    # Alibaba Cloud metadata address: 100.100.100.200

@@ -65,7 +65,7 @@ jobs:
           fi
           name="cx-${GOOS}-${GOARCH}${ext}"
           mkdir -p dist
-          go build -tags "ui no_zerotier no_easytier no_tailscale" -trimpath \
+          go build -tags "ui with_gvisor no_zerotier no_easytier no_tailscale" -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o "dist/${name}" ./cmd/cx
           echo "name=${name}" >> "${GITHUB_OUTPUT}"

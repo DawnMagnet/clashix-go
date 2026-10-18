@@ -25,6 +25,7 @@ var lastFakeCore *fakeCore
 type fakeCore struct {
 	listener net.Listener
 	config   map[string]any
+	apply    func([]byte) error
 }
 
 func (f *fakeCore) Start(_ context.Context, _ string, cfg []byte) error {
@@ -54,13 +55,18 @@ func (f *fakeCore) Stop() error {
 	return err
 }
 
-func (f *fakeCore) Apply(string, []byte) error { return nil }
+func (f *fakeCore) Apply(_ string, cfg []byte) error {
+	if f.apply != nil {
+		return f.apply(cfg)
+	}
+	return nil
+}
 
-func useFakeCore(t *testing.T) {
+func useFakeCore(t *testing.T) *fakeCore {
 	t.Helper()
 	oldCore, oldValidate := newCore, validateConfig
+	fake := &fakeCore{}
 	newCore = func() core.Core {
-		fake := &fakeCore{}
 		lastFakeCore = fake
 		return fake
 	}
@@ -70,6 +76,7 @@ func useFakeCore(t *testing.T) {
 		validateConfig = oldValidate
 		lastFakeCore = nil
 	})
+	return fake
 }
 
 func writeConfig(t *testing.T) string {
@@ -424,6 +431,46 @@ func TestServeGeneratesControllerSecret(t *testing.T) {
 	}
 }
 
+func TestServeReloadTunFailureRollsBack(t *testing.T) {
+	fake := useFakeCore(t)
+	state := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	calls := 0
+	fake.apply = func([]byte) error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("%w: test", core.ErrTunNotStarted)
+		}
+		cancel()
+		return nil
+	}
+	var stderr strings.Builder
+	root := NewRoot("dev")
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--config", writeConfig(t), "--dir", state, "--sub-interval", "20ms"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("Apply calls = %d, want reload failure plus rollback", calls)
+	}
+	for _, want := range []string{"TUN inbound did not start", "rolled back to previous working configuration"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q does not mention %q", stderr.String(), want)
+		}
+	}
+	cfg, err := config.Load(config.DefaultConfigPath(state))
+	if err != nil {
+		t.Fatalf("Load rolled-back config: %v", err)
+	}
+	if _, exists := cfg["tun"]; exists {
+		t.Errorf("rolled-back config retained failed TUN settings: %#v", cfg["tun"])
+	}
+}
+
 func TestSubUpdateValidationFailureKeepsActive(t *testing.T) {
 	useFakeCore(t)
 	validateConfig = func(string, []byte) error { return errors.New("invalid config") }
@@ -607,6 +654,50 @@ rules:
 		if _, exists := lastFakeCore.config[key]; exists {
 			t.Errorf("run kept alternate controller key %q", key)
 		}
+	}
+}
+
+func TestRunTunFlagOverlay(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	root := NewRoot("dev")
+	root.SetArgs([]string{
+		"run", "--config", writeConfig(t),
+		"--tun", "--tun-stack", "gvisor",
+		"--tun-exclude", "10.0.0.0/8", "--tun-exclude", "2001:db8::/32",
+		"--", "sh", "-c", "exit 0",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	tun, ok := lastFakeCore.config["tun"].(map[string]any)
+	if !ok {
+		t.Fatalf("tun config = %#v", lastFakeCore.config["tun"])
+	}
+	if tun["enable"] != true || tun["stack"] != "gvisor" {
+		t.Errorf("tun enable/stack = %#v", tun)
+	}
+	if tun["auto-route"] != true || tun["auto-detect-interface"] != true {
+		t.Errorf("tun auto-route/auto-detect-interface = %#v", tun)
+	}
+	routes, ok := tun["route-exclude-address"].([]any)
+	if !ok || len(routes) != 2 || routes[0] != "10.0.0.0/8" || routes[1] != "2001:db8::/32" {
+		t.Errorf("route-exclude-address = %#v", tun["route-exclude-address"])
+	}
+}
+
+func TestTunFlagsValidateCIDR(t *testing.T) {
+	root := NewRoot("dev")
+	root.SetArgs([]string{
+		"run", "--config", writeConfig(t),
+		"--tun", "--tun-exclude", "not-a-cidr",
+		"--", "sh", "-c", "exit 0",
+	})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "CIDR") {
+		t.Fatalf("Execute error = %v, want CIDR validation error", err)
 	}
 }
 

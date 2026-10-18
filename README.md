@@ -52,21 +52,22 @@ cd clashix-go
 
 # Slim build without the web panel.
 CGO_ENABLED=0 go build \
-  -tags "no_zerotier no_easytier no_tailscale" \
+  -tags "with_gvisor no_zerotier no_easytier no_tailscale" \
   -trimpath -o cx ./cmd/cx
 
 # Build with the bundled metacubexd panel.
 ./scripts/fetch-ui.sh
 CGO_ENABLED=0 go build \
-  -tags "ui no_zerotier no_easytier no_tailscale" \
+  -tags "ui with_gvisor no_zerotier no_easytier no_tailscale" \
   -trimpath -o cx ./cmd/cx
 ```
 
 A plain `go build ./cmd/cx` still compiles, but reports the panel as not bundled.
-The `no_zerotier no_easytier no_tailscale` tags drop the optional ZeroTier,
-EasyTier, and Tailscale outbounds; mainstream protocols (ss, ssr, vmess, vless,
-reality, trojan, hysteria, hysteria2, tuic, wireguard, socks5, http, snell,
-anytls) remain. Mihomo has no exclusion tags for mieru, SSH, AmneziaWG, or
+The `with_gvisor` tag adds mihomo's gVisor TUN stack (needed for
+`--tun-stack gvisor` and `mixed`). The `no_zerotier no_easytier no_tailscale`
+tags drop the optional ZeroTier, EasyTier, and Tailscale outbounds; mainstream
+protocols (ss, ssr, vmess, vless, reality, trojan, hysteria, hysteria2, tuic,
+wireguard, socks5, http, snell, anytls) remain. Mihomo has no exclusion tags for mieru, SSH, AmneziaWG, or
 Wazero, so those heavy dependencies stay in the binary.
 
 ### Configuration sources
@@ -188,7 +189,8 @@ The packaged unit uses `/var/lib/cx` as its state directory. Seed it first with
 `cx sub update --dir /var/lib/cx --sub URL` (run as root), or copy a config to
 `/var/lib/cx/config.yaml`. The unit sets `ExecReload=/bin/kill -HUP $MAINPID`,
 so `sudo systemctl reload cx` applies a new configuration without a restart.
-TUN mode may need root; for proxy-only operation uncomment `User=`/`Group=`.
+The unit uses `Restart=always`; see [TUN mode](#tun-mode) for capabilities and
+device access. For proxy-only operation uncomment `User=`/`Group=`.
 
 #### Hardened public-server example
 
@@ -235,6 +237,52 @@ controller; keep it on loopback and access it through an SSH tunnel or a
 reverse proxy with TLS and authentication. Do not expose the controller
 directly to the internet.
 
+#### TUN mode
+
+TUN needs root or `CAP_NET_ADMIN`; binding mihomo's DNS listener on port 53
+additionally needs `CAP_NET_BIND_SERVICE`. The gVisor and mixed stacks require
+a build with the `with_gvisor` tag. For a systemd TUN deployment keep the
+hardening in [`packaging/systemd/cx.service`](packaging/systemd/cx.service) and
+add:
+
+```ini
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+DeviceAllow=/dev/net/tun rw
+PrivateDevices=no
+```
+
+`cx` checks mihomo's in-process TUN state after startup and after every reload.
+If TUN was requested but did not come up, startup logs a clear error and exits
+non-zero; a reload logs the error, re-applies the previous working
+configuration, and keeps the service alive.
+
+The flags are `--tun`, `--tun-stack system|gvisor|mixed`, and repeatable
+`--tun-exclude CIDR`; they override the config/override/`tun` section. On a
+public server, exclude private, link-local, CGNAT, and metadata ranges, and keep
+local/cloud names out of fake-IP. A ready-to-merge fragment with system stack,
+automatic routing/interface detection, private-range exclusions, fake-IP, and
+metadata/local-domain filters is in
+[`examples/override-tun-server.yaml`](examples/override-tun-server.yaml).
+
+```sh
+cx serve --config config.yaml --override examples/override-tun-server.yaml --tun
+cx serve --config config.yaml --tun --tun-stack system \
+  --tun-exclude 10.0.0.0/8 --tun-exclude 192.168.0.0/16
+```
+
+On public servers also exclude cloud metadata endpoints such as
+`metadata.google.internal`, `metadata.tencentyun.com`, and `100.100.100.200`,
+and use `fake-ip-filter` for `*.lan`, `*.local`, `+.localhost`, `+.internal`,
+and local/cloud domains. Never route cloud metadata traffic through a
+third-party proxy.
+
+#### Operations notes
+
+A systemd transient timer created with `systemd-run --on-active=...` restarts
+its countdown after `systemctl daemon-reload`. Re-create the timer if you need
+the original deadline.
+
 A launchd agent is provided at
 [`packaging/launchd/com.dawnmagnet.cx.plist`](packaging/launchd/com.dawnmagnet.cx.plist):
 
@@ -247,9 +295,9 @@ launchctl kill SIGHUP gui/"$(id -u)"/com.dawnmagnet.cx   # reload
 ```
 
 launchd has no `ExecReload` or `EnvironmentFile`; use `launchctl kill SIGHUP`
-and `EnvironmentVariables` or a wrapper script. `KeepAlive` with
-`SuccessfulExit=false` is the `Restart=on-failure` equivalent, and
-`ThrottleInterval` is the `RestartSec` equivalent.
+and `EnvironmentVariables` or a wrapper script. `KeepAlive=true` is the
+`Restart=always` equivalent, and `ThrottleInterval` is the `RestartSec`
+equivalent.
 
 ### `cx run`
 
@@ -351,7 +399,7 @@ CGO_ENABLED=0 go build ./...
 CI covers Linux, macOS, and Windows tests plus cross-builds for
 linux/darwin/windows/freebsd `amd64`/`arm64` and linux `armv7`. CI and releases
 fetch the pinned panel and build with
-`-tags "ui no_zerotier no_easytier no_tailscale"`. Tagged releases use the same
+`-tags "ui with_gvisor no_zerotier no_easytier no_tailscale"`. Tagged releases use the same
 tags plus `-trimpath -ldflags "-s -w -X main.version=<tag>"`.
 
 ## 中文
@@ -403,20 +451,21 @@ cd clashix-go
 
 # 不带内置面板的精简构建
 CGO_ENABLED=0 go build \
-  -tags "no_zerotier no_easytier no_tailscale" \
+  -tags "with_gvisor no_zerotier no_easytier no_tailscale" \
   -trimpath -o cx ./cmd/cx
 
 # 带 metacubexd 面板的构建
 ./scripts/fetch-ui.sh
 CGO_ENABLED=0 go build \
-  -tags "ui no_zerotier no_easytier no_tailscale" \
+  -tags "ui with_gvisor no_zerotier no_easytier no_tailscale" \
   -trimpath -o cx ./cmd/cx
 ```
 
 普通 `go build ./cmd/cx` 仍可编译，但会提示面板未内置。
-`no_zerotier no_easytier no_tailscale` 会移除可选的 ZeroTier、EasyTier 和
-Tailscale 出站；主流协议（ss、ssr、vmess、vless、reality、trojan、hysteria、
-hysteria2、tuic、wireguard、socks5、http、snell、anytls）保留。mihomo 没有
+`with_gvisor` tag 会加入 mihomo 的 gVisor TUN 栈（`--tun-stack gvisor` 和
+`mixed` 需要）。`no_zerotier no_easytier no_tailscale` 会移除可选的 ZeroTier、
+EasyTier 和 Tailscale 出站；主流协议（ss、ssr、vmess、vless、reality、trojan、
+hysteria、hysteria2、tuic、wireguard、socks5、http、snell、anytls）保留。mihomo 没有
 mieru、SSH、AmneziaWG、Wazero 的排除 tag，因此这些较重依赖仍会保留。
 
 ### 配置来源
@@ -522,8 +571,9 @@ sudo systemctl enable --now cx
 该单元使用 `/var/lib/cx`。请先以 root 执行
 `cx sub update --dir /var/lib/cx --sub URL`，或把配置复制到
 `/var/lib/cx/config.yaml`。单元设置了 `ExecReload=/bin/kill -HUP $MAINPID`，
-因此 `sudo systemctl reload cx` 可应用新配置而无需重启。TUN 模式可能需要
-root；仅代理模式可取消注释 `User=`/`Group=`。
+因此 `sudo systemctl reload cx` 可应用新配置而无需重启。单元使用
+`Restart=always`；TUN 所需能力与设备访问见 [TUN 模式](#tun-模式)。仅代理模式
+可取消注释 `User=`/`Group=`。
 
 #### 公网服务器加固示例
 
@@ -568,6 +618,48 @@ secret 来自 `/etc/cx/cx.env` 中的 `CX_SECRET`（也可以使用 `--secret`�
 和控制器；请保持 loopback，并通过 SSH 隧道或带 TLS 与认证的反向代理访问。
 不要直接把控制器暴露到公网。
 
+#### TUN 模式
+
+TUN 需要 root 或 `CAP_NET_ADMIN`；若 mihomo 的 DNS 监听绑定 53 端口，还需要
+`CAP_NET_BIND_SERVICE`。gVisor 和 mixed 栈要求构建时带 `with_gvisor` tag。
+systemd TUN 部署保留
+[`packaging/systemd/cx.service`](packaging/systemd/cx.service) 中的加固项，并添加：
+
+```ini
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+DeviceAllow=/dev/net/tun rw
+PrivateDevices=no
+```
+
+`cx` 会在启动后和每次重载后检查 mihomo 进程内的 TUN 状态。若配置启用了 TUN
+但未成功启动：启动时打印明确错误并以非零状态退出；重载时打印错误、重新应用
+上一份可用配置，并保持服务运行。
+
+相关参数为 `--tun`、`--tun-stack system|gvisor|mixed` 和可重复的
+`--tun-exclude CIDR`；它们优先于配置、覆盖文件和 `tun` 段。公网服务器应排除
+私有、链路本地、CGNAT 和元数据地址段，并让本地/云域名不进入 fake-IP。
+可直接合并的配置片段见
+[`examples/override-tun-server.yaml`](examples/override-tun-server.yaml)，包含
+system 栈、自动路由/网卡检测、私有网段排除、fake-IP 以及本地/元数据域名过滤。
+
+```sh
+cx serve --config config.yaml --override examples/override-tun-server.yaml --tun
+cx serve --config config.yaml --tun --tun-stack system \
+  --tun-exclude 10.0.0.0/8 --tun-exclude 192.168.0.0/16
+```
+
+公网服务器还应排除 `metadata.google.internal`、`metadata.tencentyun.com`、
+`100.100.100.200` 等云元数据端点，并用 `fake-ip-filter` 保护 `*.lan`、
+`*.local`、`+.localhost`、`+.internal` 及本地/云域名。不要把云元数据流量
+路由到第三方代理。
+
+#### 运维提示
+
+使用 `systemd-run --on-active=...` 创建的 systemd 临时计时器，在
+`systemctl daemon-reload` 后会重新开始倒计时。若需保留原到期时间，请重新创建
+计时器。
+
 launchd 配置位于
 [`packaging/launchd/com.dawnmagnet.cx.plist`](packaging/launchd/com.dawnmagnet.cx.plist)：
 
@@ -580,9 +672,8 @@ launchctl kill SIGHUP gui/"$(id -u)"/com.dawnmagnet.cx   # 重载
 ```
 
 launchd 没有 `ExecReload` 或 `EnvironmentFile`；请使用 `launchctl kill SIGHUP`
-以及 `EnvironmentVariables` 或包装脚本。`KeepAlive` 的
-`SuccessfulExit=false` 对应 `Restart=on-failure`，`ThrottleInterval` 对应
-`RestartSec`。
+以及 `EnvironmentVariables` 或包装脚本。`KeepAlive=true` 对应
+`Restart=always`，`ThrottleInterval` 对应 `RestartSec`。
 
 ### `cx run`
 
@@ -675,5 +766,5 @@ CGO_ENABLED=0 go build ./...
 
 CI 覆盖 Linux、macOS、Windows 测试，以及 linux/darwin/windows/freebsd
 `amd64`/`arm64` 与 linux `armv7` 交叉构建。CI 和发布流程会拉取固定版本面板，
-并使用 `-tags "ui no_zerotier no_easytier no_tailscale"` 构建。打 tag 发布时
+并使用 `-tags "ui with_gvisor no_zerotier no_easytier no_tailscale"` 构建。打 tag 发布时
 还使用 `-trimpath -ldflags "-s -w -X main.version=<tag>"`。

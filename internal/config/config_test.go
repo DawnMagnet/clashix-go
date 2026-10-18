@@ -122,6 +122,10 @@ func TestApplyOverlay(t *testing.T) {
 	cfg := map[string]any{
 		"port":    1,
 		"unknown": "keep",
+		"tun": map[string]any{
+			"mtu":        9000,
+			"auto-route": false,
+		},
 	}
 	overlay := Overlay{
 		Port:               IntPtr(2),
@@ -131,6 +135,9 @@ func TestApplyOverlay(t *testing.T) {
 		LogLevel:           StringPtr("debug"),
 		ExternalController: StringPtr("127.0.0.1:9090"),
 		Secret:             StringPtr("s3cret"),
+		TunEnable:          BoolPtr(true),
+		TunStack:           StringPtr("system"),
+		TunExcludeRoutes:   []string{"10.0.0.0/8", "fc00::/7"},
 	}
 	ApplyOverlay(cfg, overlay)
 
@@ -151,6 +158,20 @@ func TestApplyOverlay(t *testing.T) {
 	}
 	if _, ok := cfg["socks-port"]; ok {
 		t.Error("nil overlay field changed socks-port")
+	}
+	tun, ok := cfg["tun"].(map[string]any)
+	if !ok {
+		t.Fatalf("tun = %#v", cfg["tun"])
+	}
+	if tun["enable"] != true || tun["stack"] != "system" || tun["auto-route"] != true || tun["auto-detect-interface"] != true {
+		t.Errorf("tun = %#v", tun)
+	}
+	if tun["mtu"] != 9000 {
+		t.Errorf("tun.mtu = %v, want the existing value preserved", tun["mtu"])
+	}
+	routes, ok := tun["route-exclude-address"].([]any)
+	if !ok || len(routes) != 2 || routes[0] != "10.0.0.0/8" || routes[1] != "fc00::/7" {
+		t.Errorf("tun.route-exclude-address = %#v", tun["route-exclude-address"])
 	}
 }
 

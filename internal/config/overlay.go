@@ -13,6 +13,10 @@ type Overlay struct {
 	LogLevel           *string
 	ExternalController *string
 	Secret             *string
+
+	TunEnable        *bool
+	TunStack         *string
+	TunExcludeRoutes []string
 }
 
 // ApplyOverlay writes the controlled keys into cfg. Unknown keys and all
@@ -51,6 +55,35 @@ func ApplyOverlay(cfg map[string]any, overlay Overlay) {
 	if overlay.Secret != nil {
 		cfg["secret"] = *overlay.Secret
 	}
+	if overlay.TunEnable != nil || overlay.TunStack != nil || overlay.TunExcludeRoutes != nil {
+		tun := ensureMap(cfg, "tun")
+		if overlay.TunEnable != nil {
+			tun["enable"] = *overlay.TunEnable
+		}
+		if overlay.TunStack != nil {
+			tun["stack"] = *overlay.TunStack
+		}
+		if overlay.TunExcludeRoutes != nil {
+			routes := make([]any, len(overlay.TunExcludeRoutes))
+			for i, route := range overlay.TunExcludeRoutes {
+				routes[i] = route
+			}
+			tun["route-exclude-address"] = routes
+		}
+		if overlay.TunStack != nil || overlay.TunExcludeRoutes != nil || (overlay.TunEnable != nil && *overlay.TunEnable) {
+			tun["auto-route"] = true
+			tun["auto-detect-interface"] = true
+		}
+	}
+}
+
+func ensureMap(cfg map[string]any, key string) map[string]any {
+	if value, ok := cfg[key].(map[string]any); ok {
+		return value
+	}
+	value := map[string]any{}
+	cfg[key] = value
+	return value
 }
 
 // Apply is a convenience method for ApplyOverlay.
