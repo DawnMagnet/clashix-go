@@ -17,6 +17,7 @@ import (
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
+	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub"
 	"github.com/metacubex/mihomo/hub/executor"
@@ -227,6 +228,16 @@ func (m *Mihomo) Stop() error {
 		err = fmt.Errorf("prepare mihomo shutdown: %w", err)
 	}
 	executor.Shutdown()
+	if cache := cachefile.Cache(); cache != nil && cache.DB != nil {
+		if closeErr := cache.Close(); closeErr != nil {
+			closeErr = fmt.Errorf("close mihomo cache: %w", closeErr)
+			if err != nil {
+				err = errors.Join(err, closeErr)
+			} else {
+				err = closeErr
+			}
+		}
+	}
 	return err
 }
 

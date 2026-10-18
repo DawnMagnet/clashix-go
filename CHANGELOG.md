@@ -37,6 +37,12 @@ All notable changes to this project are documented in this file.
   `_nuxt/` and `_fonts/`.
 - The expected external-controller "Server closed" error is filtered from
   shutdown logs.
+- Windows: mihomo's cache database is closed on Stop so temporary state
+  directories can be removed.
+- Windows: occupied-port detection recognizes WSAEADDRINUSE.
+- Windows: in-place `cx pack` closes source handles before replacement and
+  refuses to overwrite the running executable.
+- CI actions updated to current major versions.
 
 ## [0.1.0] - 2026-10-18
 

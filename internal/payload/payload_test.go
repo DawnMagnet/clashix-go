@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -143,6 +144,23 @@ func TestWriteRepackInPlace(t *testing.T) {
 	}
 	if string(got["two"]) != "2" {
 		t.Errorf("two = %q", got["two"])
+	}
+}
+
+func TestWriteRejectsRunningExecutableOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("running executables can be replaced on Unix")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = Write(exe, exe, map[string][]byte{"config.yaml": []byte("new: true\n")})
+	if err == nil {
+		t.Fatal("Write replaced the running executable")
+	}
+	if !strings.Contains(err.Error(), "running executable") {
+		t.Errorf("error = %v, want a clear running-executable error", err)
 	}
 }
 

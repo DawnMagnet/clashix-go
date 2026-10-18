@@ -1,17 +1,15 @@
 package core
 
 import (
-	"errors"
 	"fmt"
 	"net"
-	"syscall"
 )
 
 // CheckPortFree verifies that address can be bound before starting the core.
 func CheckPortFree(address string) error {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		if errors.Is(err, syscall.EADDRINUSE) {
+		if isAddressInUse(err) {
 			return fmt.Errorf("address %s is already in use; choose another --mixed-port", address)
 		}
 		return fmt.Errorf("check address %s: %w", address, err)
@@ -30,7 +28,7 @@ func CheckPortInUse(address string) error {
 		_ = listener.Close()
 		return fmt.Errorf("no listener is bound to %s", address)
 	}
-	if errors.Is(err, syscall.EADDRINUSE) {
+	if isAddressInUse(err) {
 		return nil
 	}
 	return fmt.Errorf("check listener %s: %w", address, err)

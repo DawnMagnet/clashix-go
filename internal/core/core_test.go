@@ -171,6 +171,9 @@ rules:
 		_ = conn.Close()
 		t.Error("mixed listener still accepts after Stop")
 	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Errorf("state directory is still locked after Stop: %v", err)
+	}
 
 	if err := NewMihomo().Start(ctx, dir, []byte(cfg)); !errors.Is(err, ErrAlreadyStarted) {
 		t.Fatalf("second Start error = %v, want ErrAlreadyStarted", err)

@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -85,6 +86,12 @@ func Read(exePath string) (files map[string][]byte, ok bool, err error) {
 // Write copies srcExe to dstExe, removes an existing payload, appends files as
 // a tar payload, and leaves dstExe executable and private (mode 0700).
 func Write(srcExe, dstExe string, files map[string][]byte) error {
+	if runtime.GOOS == "windows" {
+		if err := rejectRunningExecutable(dstExe); err != nil {
+			return err
+		}
+	}
+
 	src, err := os.Open(srcExe)
 	if err != nil {
 		return fmt.Errorf("open source executable %q: %w", srcExe, err)
@@ -126,6 +133,11 @@ func Write(srcExe, dstExe string, files map[string][]byte) error {
 
 	if _, err := io.CopyN(tmp, src, baseEnd); err != nil {
 		return fmt.Errorf("copy executable %q: %w", srcExe, err)
+	}
+	// Windows refuses to replace a file while any handle is open, including
+	// src when dstExe is the same path. All source reads are complete here.
+	if err := src.Close(); err != nil {
+		return fmt.Errorf("close source executable %q: %w", srcExe, err)
 	}
 
 	entries := make([]payloadEntry, 0, len(files))
@@ -182,6 +194,25 @@ func Write(srcExe, dstExe string, files map[string][]byte) error {
 		return fmt.Errorf("replace executable %q: %w", dstExe, err)
 	}
 	committed = true
+	return nil
+}
+
+func rejectRunningExecutable(dstExe string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil
+	}
+	dstInfo, err := os.Stat(dstExe)
+	if err != nil {
+		return nil
+	}
+	exeInfo, err := os.Stat(exe)
+	if err != nil {
+		return nil
+	}
+	if os.SameFile(dstInfo, exeInfo) {
+		return fmt.Errorf("refusing to replace the running executable %q on Windows; choose a different -o", dstExe)
+	}
 	return nil
 }
 
