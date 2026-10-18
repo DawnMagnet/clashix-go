@@ -43,5 +43,5 @@ func monotonicUsec() string {
 	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
 		return "0"
 	}
-	return strconv.FormatInt(ts.Sec*1_000_000+ts.Nsec/1_000, 10)
+	return strconv.FormatInt(int64(ts.Sec)*1_000_000+int64(ts.Nsec)/1_000, 10)
 }
