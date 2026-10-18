@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -575,5 +576,49 @@ rules:
 		if _, exists := lastFakeCore.config[key]; exists {
 			t.Errorf("run kept alternate controller key %q", key)
 		}
+	}
+}
+
+func TestRunRejectsOccupiedMixedPort(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	root := NewRoot("dev")
+	root.SetArgs([]string{
+		"run", "--config", writeConfig(t),
+		"--mixed-port", strconv.Itoa(port),
+		"--", "sh", "-c", "exit 0",
+	})
+	err = root.Execute()
+	if err == nil {
+		t.Fatal("run succeeded with an occupied mixed port")
+	}
+	if !strings.Contains(err.Error(), "already in use") {
+		t.Errorf("error = %v, want an already-in-use message", err)
+	}
+}
+
+func TestRunChildHonorsCanceledContext(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	marker := filepath.Join(t.TempDir(), "started")
+	root := NewRoot("dev")
+	err := runChild(ctx, root, []string{"sh", "-c", "touch " + marker}, 1234)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runChild error = %v, want context.Canceled", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("child ran despite a canceled context: %v", err)
 	}
 }

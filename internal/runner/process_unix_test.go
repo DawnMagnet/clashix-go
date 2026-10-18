@@ -5,9 +5,12 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -93,5 +96,66 @@ func TestRunTTYSignalEscalation(t *testing.T) {
 	}
 	if elapsed > 3*time.Second {
 		t.Errorf("escalation took too long: %s", elapsed)
+	}
+}
+
+func TestRunKillsProcessGroupWhenLeaderExits(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := dir + "/child.pid"
+	readyR, readyW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readyR.Close()
+	defer readyW.Close()
+
+	script := `trap 'exit 0' TERM
+sh -c 'trap "" TERM HUP INT; sleep 30' &
+echo $! > "$1"
+echo ready
+wait
+`
+	cmd := exec.Command("sh", "-c", script, "sh", pidFile)
+	cmd.Stdin = bytes.NewReader(nil)
+	cmd.Stdout = readyW
+	cmd.Stderr = io.Discard
+	configureProcessGroup(cmd, true)
+
+	resultCh := make(chan struct {
+		code int
+		err  error
+	}, 1)
+	go func() {
+		code, err := New(Options{GracePeriod: time.Second}).runCommand(context.Background(), cmd, true)
+		resultCh <- struct {
+			code int
+			err  error
+		}{code: code, err: err}
+	}()
+
+	ready := make([]byte, len("ready\n"))
+	if _, err := io.ReadFull(readyR, ready); err != nil {
+		t.Fatalf("read child readiness: %v", err)
+	}
+	readyW.Close()
+
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatalf("send SIGTERM: %v", err)
+	}
+	result := <-resultCh
+	if result.err != nil {
+		t.Fatalf("runCommand: %v", result.err)
+	}
+
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read grandchild pid: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		t.Fatalf("parse grandchild pid: %v", err)
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Errorf("grandchild %d survived process-group cleanup: %v", pid, err)
 	}
 }

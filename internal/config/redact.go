@@ -9,16 +9,25 @@ import (
 const Redacted = "REDACTED"
 
 var sensitiveKeys = map[string]struct{}{
-	"auth":           {},
-	"authentication": {},
-	"password":       {},
-	"private-key":    {},
-	"private_key":    {},
-	"psk":            {},
-	"secret":         {},
-	"token":          {},
-	"username":       {},
-	"uuid":           {},
+	"access-key":          {},
+	"api-key":             {},
+	"apikey":              {},
+	"auth":                {},
+	"auth-str":            {},
+	"authentication":      {},
+	"authorization":       {},
+	"password":            {},
+	"pre-shared-key":      {},
+	"pre_shared_key":      {},
+	"private-key":         {},
+	"private_key":         {},
+	"proxy-authorization": {},
+	"psk":                 {},
+	"secret":              {},
+	"secret-key":          {},
+	"token":               {},
+	"username":            {},
+	"uuid":                {},
 }
 
 // Redact returns a deep copy of cfg with controller secrets and proxy
@@ -63,9 +72,27 @@ func redactURLUserinfo(value string) (string, bool) {
 		return value, false
 	}
 	parsed, err := url.Parse(value)
-	if err != nil || parsed.User == nil {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return value, false
 	}
-	parsed.User = url.User(Redacted)
-	return parsed.String(), true
+
+	changed := false
+	if parsed.User != nil {
+		parsed.User = url.User(Redacted)
+		changed = true
+	}
+	if parsed.RawQuery != "" {
+		parsed.RawQuery = Redacted
+		changed = true
+	}
+	if parsed.Path != "" && parsed.Path != "/" {
+		parsed.Path = "/" + Redacted
+		parsed.RawPath = ""
+		changed = true
+	}
+	if parsed.Fragment != "" {
+		parsed.Fragment = Redacted
+		changed = true
+	}
+	return parsed.String(), changed
 }

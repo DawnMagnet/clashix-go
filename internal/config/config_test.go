@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -158,10 +159,20 @@ func TestRedact(t *testing.T) {
 		"secret": "controller-secret",
 		"proxies": []any{
 			map[string]any{
-				"name":     "node",
-				"username": "alice",
-				"password": "hunter2",
-				"nested":   map[string]any{"token": "abc", "safe": "value"},
+				"name":           "node",
+				"username":       "alice",
+				"password":       "hunter2",
+				"auth-str":       "hysteria-secret",
+				"pre-shared-key": "wireguard-secret",
+				"nested":         map[string]any{"token": "abc", "safe": "value"},
+			},
+		},
+		"proxy-providers": map[string]any{
+			"remote": map[string]any{
+				"url": "https://provider-user:provider-pass@example.test/private/token?token=query-secret",
+				"headers": map[string]any{
+					"Authorization": "Bearer header-secret",
+				},
 			},
 		},
 	}
@@ -173,9 +184,26 @@ func TestRedact(t *testing.T) {
 	if proxy["username"] != Redacted || proxy["password"] != Redacted {
 		t.Errorf("proxy credentials were not redacted: %#v", proxy)
 	}
+	if proxy["auth-str"] != Redacted || proxy["pre-shared-key"] != Redacted {
+		t.Errorf("proxy credential fields were not redacted: %#v", proxy)
+	}
 	nested := proxy["nested"].(map[string]any)
 	if nested["token"] != Redacted || nested["safe"] != "value" {
 		t.Errorf("nested redaction = %#v", nested)
+	}
+	provider := got["proxy-providers"].(map[string]any)["remote"].(map[string]any)
+	providerURL := provider["url"].(string)
+	for _, secret := range []string{"provider-user", "provider-pass", "private", "token", "query-secret"} {
+		if strings.Contains(providerURL, secret) {
+			t.Errorf("provider URL leaked %q: %s", secret, providerURL)
+		}
+	}
+	if !strings.Contains(providerURL, "example.test") {
+		t.Errorf("provider URL lost its host: %s", providerURL)
+	}
+	headers := provider["headers"].(map[string]any)
+	if headers["Authorization"] != Redacted {
+		t.Errorf("authorization header was not redacted: %#v", headers)
 	}
 	if cfg["secret"] != "controller-secret" {
 		t.Error("Redact mutated the input config")
@@ -458,5 +486,71 @@ func TestHasProxyCredentials(t *testing.T) {
 				t.Errorf("HasProxyCredentials = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestSafeSubscriptionSource(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "credentials and query",
+			raw:  "https://user:pass@example.test/private/path?token=secret#fragment",
+			want: "https://example.test/...",
+		},
+		{
+			name: "no path",
+			raw:  "https://example.test",
+			want: "https://example.test/...",
+		},
+		{
+			name: "invalid",
+			raw:  "://bad",
+			want: "<invalid subscription URL>",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := safeSubscriptionSource(test.raw)
+			if got != test.want {
+				t.Errorf("safeSubscriptionSource = %q, want %q", got, test.want)
+			}
+			for _, secret := range []string{"user", "pass", "private", "token", "secret"} {
+				if strings.Contains(got, secret) {
+					t.Errorf("source leaked %q: %s", secret, got)
+				}
+			}
+		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestFetchErrorSanitizesSource(t *testing.T) {
+	raw := "https://user:pass@subscription.example.test/private/path?token=query-secret"
+	fetcher := NewFetcher()
+	fetcher.Client = &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("request to %s failed", req.URL.String())
+		}),
+	}
+	_, err := fetcher.Fetch(t.Context(), raw)
+	if err == nil {
+		t.Fatal("Fetch succeeded, want error")
+	}
+	message := err.Error()
+	for _, secret := range []string{"user:pass", "private", "query-secret"} {
+		if strings.Contains(message, secret) {
+			t.Errorf("fetch error leaked %q: %s", secret, message)
+		}
+	}
+	if !strings.Contains(message, "subscription.example.test") {
+		t.Errorf("fetch error lost its sanitized source: %s", message)
 	}
 }

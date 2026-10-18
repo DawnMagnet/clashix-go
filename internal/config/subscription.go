@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"regexp"
 	"time"
 )
 
@@ -75,37 +77,69 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (map[string]any, error)
 		maxSize = MaxSubscriptionSize
 	}
 
+	source := safeSubscriptionSource(url)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create subscription request for %q: %w", url, err)
+		return nil, fmt.Errorf("create subscription request for %s: %w", source, sanitizeFetchError(err))
 	}
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/yaml, text/yaml, text/plain, */*")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch subscription %q: %w", url, err)
+		return nil, fmt.Errorf("fetch subscription %s: %w", source, sanitizeFetchError(err))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("fetch subscription %q: unexpected HTTP status %s", url, resp.Status)
+		return nil, fmt.Errorf("fetch subscription %s: unexpected HTTP status %s", source, resp.Status)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("read subscription %q: %w", url, err)
+		return nil, fmt.Errorf("read subscription %s: %w", source, err)
 	}
 	if int64(len(body)) > maxSize {
-		return nil, fmt.Errorf("subscription %q exceeds %d bytes", url, maxSize)
+		return nil, fmt.Errorf("subscription %s exceeds %d bytes", source, maxSize)
 	}
 
 	cfg, err := parseSubscription(body)
 	if err != nil {
-		return nil, fmt.Errorf("parse subscription %q: %w", url, err)
+		return nil, fmt.Errorf("parse subscription %s: %w", source, err)
 	}
 	return cfg, nil
 }
+
+func safeSubscriptionSource(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "<invalid subscription URL>"
+	}
+	parsed.User = nil
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	parsed.Path = "/..."
+	parsed.RawPath = ""
+	return parsed.String()
+}
+
+var subscriptionURLPattern = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.-]*://[^\s"']+`)
+
+func sanitizeFetchError(err error) error {
+	if err == nil {
+		return nil
+	}
+	message := subscriptionURLPattern.ReplaceAllStringFunc(err.Error(), safeSubscriptionSource)
+	return &sanitizedError{message: message, err: err}
+}
+
+type sanitizedError struct {
+	message string
+	err     error
+}
+
+func (e *sanitizedError) Error() string { return e.message }
+func (e *sanitizedError) Unwrap() error { return e.err }
 
 func parseSubscription(body []byte) (map[string]any, error) {
 	body = bytes.TrimPrefix(bytes.TrimSpace(body), []byte{0xEF, 0xBB, 0xBF})

@@ -20,7 +20,14 @@ All notable changes to this project are documented in this file.
 
 - TTY-mode `cx run` now escalates a surviving child from SIGINT to SIGTERM and
   then SIGKILL after the grace periods.
-- `cx config show` redacts credentials embedded in URL userinfo.
+- `cx run` forwards the signal-aware context to the child runner and cleans up
+  isolated process groups before returning.
+- `cx run` rejects occupied mixed ports and verifies mihomo actually bound the
+  selected port before launching the child.
+- Subscription fetch errors use sanitized URLs, hiding credentials, query
+  parameters, and path tokens.
+- `cx config show` redacts additional credential fields, authorization headers,
+  URL userinfo, query strings, and URL paths.
 - `cx run` disables TLS, Unix-socket, and named-pipe controller endpoints.
 
 ## [0.1.0] - 2026-10-18

@@ -227,6 +227,10 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
+			mixedAddress := fmt.Sprintf("127.0.0.1:%d", mixedPort)
+			if err := core.CheckPortFree(mixedAddress); err != nil {
+				return err
+			}
 			engine := newCore()
 			if err := engine.Start(ctx, stateDir, data); err != nil {
 				return fmt.Errorf("start core: %w", err)
@@ -234,15 +238,16 @@ func newRunCmd() *cobra.Command {
 			defer func() {
 				_ = engine.Stop()
 			}()
-
-			mixedAddress := fmt.Sprintf("127.0.0.1:%d", mixedPort)
+			if err := core.CheckPortInUse(mixedAddress); err != nil {
+				return fmt.Errorf("mixed proxy failed to bind: %w", err)
+			}
 			if err := core.WaitReady(ctx, mixedAddress, core.DefaultReadyTimeout); err != nil {
 				return fmt.Errorf("proxy did not become ready: %w", err)
 			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			return runChild(cmd, args, mixedPort)
+			return runChild(ctx, cmd, args, mixedPort)
 		},
 	}
 	cmd.Flags().StringVar(&controller, "controller", "", "external controller address (disabled when empty)")

@@ -3,9 +3,11 @@
 package runner
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 func configureProcessGroup(cmd *exec.Cmd, isolate bool) {
@@ -29,11 +31,24 @@ func signalChild(process *os.Process, sig os.Signal, isolate bool) error {
 	return syscall.Kill(-process.Pid, signal)
 }
 
-func killChild(process *os.Process, isolate bool) error {
+func cleanupChild(process *os.Process, isolate bool) error {
 	if !isolate {
 		return process.Kill()
 	}
-	return syscall.Kill(-process.Pid, syscall.SIGKILL)
+	pid := process.Pid
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	// SIGKILL is immediate, but descendants may still be reaped by init. Wait
+	// briefly so run returns only after the process group is actually gone.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(-pid, 0); errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
 }
 
 func processExitCode(state *os.ProcessState) int {

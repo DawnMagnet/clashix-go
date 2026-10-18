@@ -94,9 +94,10 @@ func (r *Runner) runCommand(ctx context.Context, cmd *exec.Cmd, isolateGroup boo
 	)
 
 	var (
-		graceTimer *time.Timer
-		graceC     <-chan time.Time
-		stage      escalation
+		graceTimer  *time.Timer
+		graceC      <-chan time.Time
+		stage       escalation
+		terminating bool
 	)
 	startGrace := func(next escalation) {
 		if graceTimer != nil {
@@ -119,6 +120,11 @@ func (r *Runner) runCommand(ctx context.Context, cmd *exec.Cmd, isolateGroup boo
 	for {
 		select {
 		case err := <-waitCh:
+			if terminating && isolateGroup {
+				// The leader can exit while descendants survive. Finish cleanup
+				// of the isolated group before reporting the exit.
+				_ = cleanupChild(cmd.Process, true)
+			}
 			if err == nil {
 				return 0, nil
 			}
@@ -132,12 +138,14 @@ func (r *Runner) runCommand(ctx context.Context, cmd *exec.Cmd, isolateGroup boo
 			// group, so the terminal has already delivered SIGINT to it. Do not
 			// double-forward SIGINT, but start escalation in case it ignores it.
 			if sig == os.Interrupt && !isolateGroup {
+				terminating = true
 				startGrace(escalationTTYInterrupt)
 				continue
 			}
 			// Best effort: the child may have exited between Wait and forwarding.
 			_ = signalChild(cmd.Process, sig, isolateGroup)
 			if isTerminationSignal(sig) {
+				terminating = true
 				startGrace(escalationKill)
 			}
 		case <-graceC:
@@ -151,10 +159,11 @@ func (r *Runner) runCommand(ctx context.Context, cmd *exec.Cmd, isolateGroup boo
 				graceC = graceTimer.C
 				continue
 			}
-			_ = killChild(cmd.Process, isolateGroup)
+			_ = cleanupChild(cmd.Process, isolateGroup)
 			stage = escalationNone
 		case <-ctxDone:
 			ctxDone = nil
+			terminating = true
 			// Best effort: the child may already be gone.
 			_ = signalChild(cmd.Process, syscall.SIGTERM, isolateGroup)
 			startGrace(escalationKill)

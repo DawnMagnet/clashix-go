@@ -27,7 +27,7 @@ func signalChild(process *os.Process, sig os.Signal, _ bool) error {
 	return process.Kill()
 }
 
-func killChild(process *os.Process, _ bool) error {
+func cleanupChild(process *os.Process, _ bool) error {
 	return process.Kill()
 }
 
