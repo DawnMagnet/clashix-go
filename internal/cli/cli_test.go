@@ -71,6 +71,16 @@ func useFakeCore(t *testing.T) {
 	})
 }
 
+func writeConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mixed-port: 0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestVersionCommand(t *testing.T) {
 	root := NewRoot("test-version")
 	var out strings.Builder
@@ -79,8 +89,25 @@ func TestVersionCommand(t *testing.T) {
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if got := strings.TrimSpace(out.String()); got != "cx test-version" {
-		t.Errorf("version output = %q", got)
+	output := out.String()
+	if !strings.Contains(output, "cx test-version") {
+		t.Errorf("version output = %q", output)
+	}
+	if !strings.Contains(output, "payload: none") {
+		t.Errorf("version output does not report payload: %q", output)
+	}
+}
+
+func TestNoConfigSourceError(t *testing.T) {
+	opts := &configOptions{}
+	_, err := loadEffectiveConfig(context.Background(), opts, config.Overlay{}, false, filepath.Join(t.TempDir(), "missing.yaml"))
+	if err == nil {
+		t.Fatal("loadEffectiveConfig succeeded without a config source")
+	}
+	for _, want := range []string{"no configuration source", "--config", "--sub", "cx sub update"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 
@@ -128,7 +155,7 @@ func TestRunPropagatesExitCode(t *testing.T) {
 	}
 	useFakeCore(t)
 	root := NewRoot("dev")
-	root.SetArgs([]string{"run", "--", "sh", "-c", "exit 7"})
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--", "sh", "-c", "exit 7"})
 	err := root.Execute()
 	var exitErr *ExitError
 	if !errors.As(err, &exitErr) {
@@ -145,7 +172,7 @@ func TestRunOverridesPortsAndController(t *testing.T) {
 	}
 	useFakeCore(t)
 	root := NewRoot("dev")
-	root.SetArgs([]string{"run", "--", "sh", "-c", "exit 0"})
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--", "sh", "-c", "exit 0"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -161,6 +188,9 @@ func TestRunOverridesPortsAndController(t *testing.T) {
 	}
 	if cfg["external-controller"] != "" {
 		t.Errorf("external-controller = %v, want disabled", cfg["external-controller"])
+	}
+	if cfg["log-level"] != "warning" {
+		t.Errorf("log-level = %v, want warning", cfg["log-level"])
 	}
 	if port, _ := cfg["mixed-port"].(int); port <= 0 {
 		t.Errorf("mixed-port = %v, want a selected port", cfg["mixed-port"])
@@ -178,7 +208,7 @@ func TestRunExportsProxyEnvironment(t *testing.T) {
 	root := NewRoot("dev")
 	var out strings.Builder
 	root.SetOut(&out)
-	root.SetArgs([]string{"run", "--", "sh", "-c", `printf '%s\n' "$http_proxy" "$HTTP_PROXY" "$https_proxy" "$all_proxy" "$no_proxy"`})
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--", "sh", "-c", `printf '%s\n' "$http_proxy" "$HTTP_PROXY" "$https_proxy" "$all_proxy" "$no_proxy"`})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -206,7 +236,7 @@ func TestPackAndReadPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "input.yaml")
-	if err := os.WriteFile(configPath, []byte("port: 7890\nproxies: []\n"), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte("port: 7890\nproxies:\n  - name: node\n    type: ss\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	geodataDir := filepath.Join(dir, "geo")
@@ -214,6 +244,9 @@ func TestPackAndReadPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(geodataDir, "geoip.dat"), []byte("geo"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(geodataDir, "README.txt"), []byte("ignore"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	output := filepath.Join(dir, "packed")
@@ -241,9 +274,19 @@ func TestPackAndReadPayload(t *testing.T) {
 	if string(files["geoip.dat"]) != "geo" {
 		t.Errorf("geoip.dat = %q", files["geoip.dat"])
 	}
-	packedCfg, err := config.Parse(files["config.yaml"])
-	if err != nil {
-		t.Fatalf("parse packed config: %v", err)
+	if _, exists := files["README.txt"]; exists {
+		t.Error("pack included an unknown geodata file")
+	}
+	names, payloadPresent, err := payloadFilesFrom(output)
+	if err != nil || !payloadPresent {
+		t.Fatalf("payloadFilesFrom = %v, %v; want payload", payloadPresent, err)
+	}
+	if !strings.Contains(strings.Join(names, ","), "config.yaml") || !strings.Contains(strings.Join(names, ","), "geoip.dat") {
+		t.Errorf("payload files = %v", names)
+	}
+	packedCfg, embedded, err := embeddedConfigFrom(output)
+	if err != nil || !embedded {
+		t.Fatalf("embeddedConfigFrom = %v, %v; want embedded", embedded, err)
 	}
 	if packedCfg["port"] != 7890 {
 		t.Errorf("packed port = %v", packedCfg["port"])
@@ -291,7 +334,7 @@ func TestServeWritesConfigAndStops(t *testing.T) {
 
 	root := NewRoot("dev")
 	root.SetContext(ctx)
-	root.SetArgs([]string{"serve", "--dir", state})
+	root.SetArgs([]string{"serve", "--config", writeConfig(t), "--dir", state})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -332,5 +375,34 @@ func TestSubUpdateValidationFailureKeepsActive(t *testing.T) {
 	}
 	if cfg["port"] != 7890 {
 		t.Errorf("active config was replaced after validation failure: %#v", cfg)
+	}
+}
+
+func TestPackWarnsForSubscription(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("mixed-port: 0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("fake-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "packed")
+
+	root := NewRoot("dev")
+	var stdout, stderr strings.Builder
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"pack", "-o", output, "--target-binary", target, "--sub", server.URL})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "WARNING") || !strings.Contains(stderr.String(), "private") {
+		t.Errorf("pack did not warn about subscription-derived credentials: %q", stderr.String())
+	}
+	if _, ok, err := payload.Read(output); err != nil || !ok {
+		t.Fatalf("packed output = %v, %v; want payload", ok, err)
 	}
 }

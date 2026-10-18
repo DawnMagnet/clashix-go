@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
@@ -152,6 +154,7 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 		switch {
 		case err == nil:
 			base = cfg
+			haveBase = true
 		case errors.Is(err, os.ErrNotExist):
 			// No cached configuration yet.
 		default:
@@ -159,12 +162,19 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 		}
 	}
 
-	if base == nil {
-		base = map[string]any{}
+	if !haveBase {
+		return nil, noConfigSourceError(fallbackPath)
 	}
 	config.ApplyOverlay(base, overlay)
 	config.ApplyGeoXDefaults(base)
 	return base, nil
+}
+
+func noConfigSourceError(cachedPath string) error {
+	if cachedPath == "" {
+		return fmt.Errorf("no configuration source found: provide --config FILE, --sub URL, or use a packed binary with an embedded config")
+	}
+	return fmt.Errorf("no configuration source found (checked embedded payload, --config, --sub, and cached config %q): provide --config FILE, --sub URL, run \"cx sub update\", or use a packed binary with an embedded config", cachedPath)
 }
 
 func embeddedConfig() (map[string]any, bool, error) {
@@ -172,6 +182,10 @@ func embeddedConfig() (map[string]any, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("locate current executable: %w", err)
 	}
+	return embeddedConfigFrom(exe)
+}
+
+func embeddedConfigFrom(exe string) (map[string]any, bool, error) {
 	files, ok, err := payload.Read(exe)
 	if err != nil {
 		return nil, false, fmt.Errorf("read embedded payload: %w", err)
@@ -188,6 +202,48 @@ func embeddedConfig() (map[string]any, bool, error) {
 		return nil, false, fmt.Errorf("parse embedded config: %w", err)
 	}
 	return cfg, true, nil
+}
+
+func payloadFiles() ([]string, bool, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, false, fmt.Errorf("locate current executable: %w", err)
+	}
+	return payloadFilesFrom(exe)
+}
+
+func payloadFilesFrom(exe string) ([]string, bool, error) {
+	files, ok, err := payload.Read(exe)
+	if err != nil {
+		return nil, false, fmt.Errorf("read embedded payload: %w", err)
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, true, nil
+}
+
+func describePayload(names []string, embedded bool) string {
+	if !embedded {
+		return "payload: none"
+	}
+	if len(names) == 0 {
+		return "payload: embedded (no files)"
+	}
+	return "payload: embedded (" + strings.Join(names, ", ") + ")"
+}
+
+func defaultCachedConfigPath() (string, error) {
+	dir, err := config.DefaultDir()
+	if err != nil {
+		return "", err
+	}
+	return config.DefaultConfigPath(dir), nil
 }
 
 func stateDir(dir string) (string, error) {

@@ -1,0 +1,24 @@
+[Unit]
+Description=Clashix (cx) proxy service
+Documentation=https://github.com/DawnMagnet/clashix-go
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The service keeps its active config and geodata under /var/lib/cx.
+# Seed it with `cx serve --config ...` or `cx sub update --dir /var/lib/cx --sub ...`.
+ExecStart=/usr/local/bin/cx serve --dir /var/lib/cx
+StateDirectory=cx
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+# TUN mode requires elevated privileges. For proxy-only operation, run as an
+# unprivileged user instead:
+# User=cx
+# Group=cx
+
+[Install]
+WantedBy=multi-user.target

@@ -13,8 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 func TestValidate(t *testing.T) {
@@ -151,10 +154,18 @@ rules:
 		t.Fatalf("proxy response = %d %q", resp.StatusCode, body)
 	}
 
-	if err := core.Stop(); err != nil {
-		t.Fatalf("Stop: %v", err)
+	var shutdownLogs bytes.Buffer
+	oldOutput := logrus.StandardLogger().Out
+	logrus.SetOutput(&shutdownLogs)
+	stopErr := core.Stop()
+	logrus.SetOutput(oldOutput)
+	if stopErr != nil {
+		t.Fatalf("Stop: %v", stopErr)
 	}
 	stopped = true
+	if strings.Contains(shutdownLogs.String(), "level=info") {
+		t.Errorf("shutdown emitted info logs: %s", shutdownLogs.String())
+	}
 
 	if conn, err := net.DialTimeout("tcp", address, 200*time.Millisecond); err == nil {
 		_ = conn.Close()
@@ -177,4 +188,10 @@ func freePort(t *testing.T) int {
 		t.Fatal(err)
 	}
 	return port
+}
+
+func TestLogsGoToStderr(t *testing.T) {
+	if got := logrus.StandardLogger().Out; got != os.Stderr {
+		t.Errorf("mihomo log output = %T, want stderr", got)
+	}
 }

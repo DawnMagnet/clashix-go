@@ -156,6 +156,14 @@ func newRunCmd() *cobra.Command {
 			defer stopSignals()
 
 			overlay := opts.overlay(cmd)
+			logLevel := "warning"
+			if cmd.Flags().Changed("log-level") {
+				logLevel = opts.logLevel
+			}
+			overlay.LogLevel = config.StringPtr(logLevel)
+			if err := core.SetLogLevel(logLevel); err != nil {
+				return err
+			}
 			if !cmd.Flags().Changed("port") {
 				overlay.Port = config.IntPtr(0)
 			}
@@ -174,7 +182,11 @@ func newRunCmd() *cobra.Command {
 				overlay.MixedPort = config.IntPtr(port)
 			}
 
-			cfg, err := loadEffectiveConfig(ctx, &opts, overlay, true, "")
+			cachedPath, err := defaultCachedConfigPath()
+			if err != nil {
+				return err
+			}
+			cfg, err := loadEffectiveConfig(ctx, &opts, overlay, true, cachedPath)
 			if err != nil {
 				return err
 			}

@@ -419,3 +419,44 @@ func TestApplyGeoXDefaults(t *testing.T) {
 		}
 	})
 }
+
+func TestHasProxyCredentials(t *testing.T) {
+	tests := []struct {
+		name             string
+		cfg              map[string]any
+		subscriptionUsed bool
+		want             bool
+	}{
+		{name: "empty", cfg: map[string]any{}},
+		{name: "subscription used", cfg: map[string]any{}, subscriptionUsed: true, want: true},
+		{
+			name: "proxies present",
+			cfg:  map[string]any{"proxies": []any{map[string]any{"name": "node"}}},
+			want: true,
+		},
+		{
+			name: "provider with URL",
+			cfg: map[string]any{
+				"proxy-providers": map[string]any{
+					"remote": map[string]any{"type": "http", "url": "https://example.test/sub"},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "provider without URL",
+			cfg: map[string]any{
+				"proxy-providers": map[string]any{
+					"local": map[string]any{"type": "file", "path": "providers/local.yaml"},
+				},
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := HasProxyCredentials(test.cfg, test.subscriptionUsed); got != test.want {
+				t.Errorf("HasProxyCredentials = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

@@ -39,7 +39,14 @@ func newVersionCmd(version string) *cobra.Command {
 		Short: "Print the cx version",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintf(cmd.OutOrStdout(), "cx %s\n", version)
+			if _, err := fmt.Fprintf(cmd.OutOrStdout(), "cx %s\n", version); err != nil {
+				return err
+			}
+			names, embedded, err := payloadFiles()
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), describePayload(names, embedded))
 			return err
 		},
 	}

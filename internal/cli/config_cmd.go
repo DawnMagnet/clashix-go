@@ -29,6 +29,12 @@ func newConfigCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			names, embedded, err := payloadFiles()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.ErrOrStderr(), describePayload(names, embedded))
+
 			cfg, err := loadEffectiveConfig(cmd.Context(), &opts, opts.overlay(cmd), true, config.DefaultConfigPath(activeDir))
 			if err != nil {
 				return err

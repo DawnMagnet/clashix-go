@@ -1,1 +1,10 @@
+# Go build outputs
+/bin/
+/dist/
+/cx
+/cx.exe
+*.test
+coverage.out
+
+# Local module/build caches
 .cache/

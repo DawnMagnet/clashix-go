@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/hub"
 	"github.com/metacubex/mihomo/hub/executor"
+	mihomolog "github.com/metacubex/mihomo/log"
 	"github.com/sirupsen/logrus"
 )
 
@@ -43,17 +45,29 @@ var (
 // DefaultReadyTimeout bounds startup readiness checks.
 const DefaultReadyTimeout = 15 * time.Second
 
-var geodataNames = []string{
+// GeodataNames lists the payload files cx installs into the state directory.
+var GeodataNames = []string{
 	"geoip.metadb",
 	"geoip.dat",
 	"geosite.dat",
 	"GeoLite2-ASN.mmdb",
+	"ASN.mmdb",
 }
 
 func init() {
 	// mihomo's logging defaults to stdout; the service is expected to log to
 	// stderr so stdout stays usable by child processes.
 	logrus.SetOutput(os.Stderr)
+}
+
+// SetLogLevel sets mihomo's process-wide log level.
+func SetLogLevel(level string) error {
+	parsed, ok := mihomolog.LogLevelMapping[strings.ToLower(level)]
+	if !ok {
+		return fmt.Errorf("invalid log level %q (want debug, info, warning, error, or silent)", level)
+	}
+	mihomolog.SetLevel(parsed)
+	return nil
 }
 
 // Mihomo is the in-process proxy core.
@@ -180,10 +194,21 @@ func (m *Mihomo) Stop() error {
 	}
 	m.started = false
 
+	// Shutdown parses an empty configuration, which emits info logs. Keep the
+	// configured level unless it is more verbose than warning.
+	previousLevel := mihomolog.Level()
+	shutdownLevel := mihomolog.WARNING
+	if previousLevel > shutdownLevel {
+		shutdownLevel = previousLevel
+	}
+	mihomolog.SetLevel(shutdownLevel)
+	defer mihomolog.SetLevel(previousLevel)
+
 	// Applying an empty configuration closes the HTTP, SOCKS, mixed, tunnel,
 	// TUN, and controller listeners through mihomo's normal reload path.
 	empty, err := executor.ParseWithBytes([]byte("{}\n"))
 	if err == nil {
+		empty.General.LogLevel = shutdownLevel
 		hub.ApplyConfig(empty)
 	} else {
 		err = fmt.Errorf("prepare mihomo shutdown: %w", err)
@@ -247,7 +272,7 @@ func installGeodata(dir string) error {
 }
 
 func writePayloadGeodata(dir string, files map[string][]byte) error {
-	for _, name := range geodataNames {
+	for _, name := range GeodataNames {
 		data, ok := files[name]
 		if !ok {
 			continue

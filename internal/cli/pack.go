@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
+	"github.com/DawnMagnet/clashix-go/internal/core"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
 	"github.com/spf13/cobra"
 )
@@ -49,33 +51,34 @@ func newPackCmd() *cobra.Command {
 
 			files := map[string][]byte{"config.yaml": data}
 			if geodataDir != "" {
-				entries, err := os.ReadDir(geodataDir)
+				info, err := os.Stat(geodataDir)
 				if err != nil {
-					return fmt.Errorf("read geodata directory %q: %w", geodataDir, err)
+					return fmt.Errorf("inspect geodata directory %q: %w", geodataDir, err)
 				}
-				for _, entry := range entries {
-					if entry.IsDir() {
+				if !info.IsDir() {
+					return fmt.Errorf("geodata path %q is not a directory", geodataDir)
+				}
+				for _, name := range core.GeodataNames {
+					path := filepath.Join(geodataDir, name)
+					geodata, err := os.ReadFile(path)
+					if errors.Is(err, os.ErrNotExist) {
 						continue
 					}
-					if entry.Name() == "config.yaml" {
-						return fmt.Errorf("geodata directory must not contain config.yaml")
-					}
-					info, err := entry.Info()
 					if err != nil {
-						return fmt.Errorf("stat geodata file %q: %w", entry.Name(), err)
+						return fmt.Errorf("read geodata file %q: %w", path, err)
 					}
-					if !info.Mode().IsRegular() {
-						continue
-					}
-					geodata, err := os.ReadFile(filepath.Join(geodataDir, entry.Name()))
-					if err != nil {
-						return fmt.Errorf("read geodata file %q: %w", entry.Name(), err)
-					}
-					files[entry.Name()] = geodata
+					files[name] = geodata
 				}
 			}
 
-			fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: the packed binary contains a resolved configuration, including proxy credentials and the controller secret. Do not publish or distribute it.")
+			if config.HasProxyCredentials(cfg, len(opts.subscriptions) > 0) {
+				fmt.Fprintln(cmd.ErrOrStderr(), "")
+				fmt.Fprintln(cmd.ErrOrStderr(), "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+				fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: this binary embeds resolved proxy configuration and credentials.")
+				fmt.Fprintln(cmd.ErrOrStderr(), "WARNING: keep it private. Never commit, upload, publish, or share the output.")
+				fmt.Fprintln(cmd.ErrOrStderr(), "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+				fmt.Fprintln(cmd.ErrOrStderr(), "")
+			}
 			if err := payload.Write(target, output, files); err != nil {
 				return err
 			}
@@ -84,7 +87,7 @@ func newPackCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&output, "output", "o", "", "output binary path")
-	cmd.Flags().StringVar(&geodataDir, "geodata", "", "directory containing geoip.metadb, geoip.dat, and geosite.dat")
+	cmd.Flags().StringVar(&geodataDir, "geodata", "", "directory containing known geodata files")
 	cmd.Flags().StringVar(&targetBinary, "target-binary", "", "binary to copy and pack (default: current executable)")
 	addConfigFlags(cmd, &opts)
 	return cmd
