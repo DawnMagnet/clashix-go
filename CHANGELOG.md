@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Optional built-in metacubexd web panel, fetched at build time and enabled with
+  `--ui`, `CX_UI`, or `external-controller`.
 - Payload reporting in `cx version` and `cx config show`.
 - Documentation, packaging files, CI, and release automation.
 
@@ -15,6 +17,8 @@ All notable changes to this project are documented in this file.
   suppresses info-level shutdown logs.
 - Commands fail with an actionable error when no configuration source exists.
 - Packed binaries are written with mode `0700`.
+- Release builds use `no_zerotier no_easytier no_tailscale` to drop optional
+  outbounds and reduce binary size.
 
 ### Fixed
 

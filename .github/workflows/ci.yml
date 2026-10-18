@@ -21,14 +21,20 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Fetch web panel assets
+        run: ./scripts/fetch-ui.sh
+
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
 
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags "no_zerotier no_easytier no_tailscale" ./...
 
       - name: Test (short)
-        run: go test -short ./...
+        run: go test -short -tags "no_zerotier no_easytier no_tailscale" ./...
+
+      - name: Build with bundled panel
+        run: go build -tags "ui no_zerotier no_easytier no_tailscale" ./...
 
   test:
     name: full tests (${{ matrix.os }})
@@ -50,7 +56,7 @@ jobs:
           cache: true
 
       - name: Test
-        run: go test ./...
+        run: go test -tags "no_zerotier no_easytier no_tailscale" ./...
 
   cross-build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}
@@ -93,5 +99,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Fetch web panel assets
+        run: ./scripts/fetch-ui.sh
+
       - name: Build
-        run: go build ./...
+        run: go build -tags "ui no_zerotier no_easytier no_tailscale" ./...

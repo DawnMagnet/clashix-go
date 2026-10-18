@@ -30,6 +30,8 @@ var (
 	validateConfig = core.Validate
 )
 
+const defaultUIAddress = "127.0.0.1:9090"
+
 type configOptions struct {
 	configPath         string
 	subscriptions      []string
@@ -83,8 +85,15 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	}
 	if changed("secret") {
 		overlay.Secret = config.StringPtr(opts.secret)
+	} else if secret := os.Getenv("CX_SECRET"); secret != "" {
+		overlay.Secret = config.StringPtr(secret)
 	}
 	return overlay
+}
+
+func addUIFlag(cmd *cobra.Command, value *string) {
+	cmd.Flags().StringVar(value, "ui", "", "enable the controller and web panel at ADDR (default 127.0.0.1:9090)")
+	cmd.Flags().Lookup("ui").NoOptDefVal = defaultUIAddress
 }
 
 func (opts *configOptions) validatePorts(cmd *cobra.Command) error {

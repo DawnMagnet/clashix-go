@@ -2,21 +2,30 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
+	"github.com/DawnMagnet/clashix-go/internal/ui"
 	"github.com/spf13/cobra"
+)
+
+var (
+	panelBundled = ui.Bundled
+	extractPanel = ui.Extract
 )
 
 func newServeCmd() *cobra.Command {
 	var (
 		dir         string
 		subInterval time.Duration
+		uiAddr      string
 		opts        configOptions
 	)
 
@@ -38,6 +47,10 @@ func newServeCmd() *cobra.Command {
 			}
 			configPath := config.DefaultConfigPath(stateDir)
 			overlay := opts.overlay(cmd)
+			resolvedUI, uiSet := resolveUI(cmd, uiAddr)
+			if uiSet {
+				overlay.ExternalController = config.StringPtr(resolvedUI)
+			}
 
 			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stopSignals()
@@ -46,12 +59,17 @@ func newServeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			warnInsecureController(cmd, "serve", cfg)
 			secret, generated, err := ensureControllerSecret(cfg, "")
 			if err != nil {
 				return err
 			}
 			if generated {
 				logControllerSecret(cmd, "serve", secret)
+			}
+			panelURL, err := setupPanel(stateDir, cfg, true, true, "serve", cmd)
+			if err != nil {
+				return err
 			}
 			data, err := config.Marshal(cfg)
 			if err != nil {
@@ -69,13 +87,19 @@ func newServeCmd() *cobra.Command {
 				return fmt.Errorf("start core: %w", err)
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: configuration active in %s\n", stateDir)
+			logPanelURL(cmd, "serve", panelURL)
 
 			reload := func(reason string) {
-				newCfg, err := loadEffectiveConfig(ctx, &opts, opts.overlay(cmd), true, configPath)
+				reloadOverlay := opts.overlay(cmd)
+				if uiSet {
+					reloadOverlay.ExternalController = config.StringPtr(resolvedUI)
+				}
+				newCfg, err := loadEffectiveConfig(ctx, &opts, reloadOverlay, true, configPath)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) failed: %v\n", reason, err)
 					return
 				}
+				warnInsecureController(cmd, "serve", newCfg)
 				newSecret, generated, err := ensureControllerSecret(newCfg, secret)
 				if err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) secret failed: %v\n", reason, err)
@@ -83,6 +107,11 @@ func newServeCmd() *cobra.Command {
 				}
 				if generated {
 					logControllerSecret(cmd, "serve", newSecret)
+				}
+				newPanelURL, err := setupPanel(stateDir, newCfg, true, false, "serve", cmd)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) panel failed: %v\n", reason, err)
+					return
 				}
 				newData, err := config.Marshal(newCfg)
 				if err != nil {
@@ -107,6 +136,10 @@ func newServeCmd() *cobra.Command {
 					return
 				}
 				secret = newSecret
+				if newPanelURL != "" && newPanelURL != panelURL {
+					panelURL = newPanelURL
+					logPanelURL(cmd, "serve", panelURL)
+				}
 				fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reloaded configuration (%s)\n", reason)
 			}
 
@@ -139,6 +172,7 @@ func newServeCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "state directory (default: user config directory/cx)")
 	cmd.Flags().DurationVar(&subInterval, "sub-interval", 0, "periodically refresh subscriptions and reload")
+	addUIFlag(cmd, &uiAddr)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
@@ -147,6 +181,7 @@ func newRunCmd() *cobra.Command {
 	var (
 		opts       configOptions
 		controller string
+		uiAddr     string
 	)
 
 	cmd := &cobra.Command{
@@ -163,6 +198,14 @@ func newRunCmd() *cobra.Command {
 			defer stopSignals()
 
 			overlay := opts.overlay(cmd)
+			resolvedUI, uiSet := resolveUI(cmd, uiAddr)
+			if !cmd.Flags().Changed("ui") && cmd.Flags().Changed("controller") {
+				// An explicit --controller wins over the CX_UI environment.
+				resolvedUI, uiSet = "", false
+			}
+			if uiSet {
+				controller = resolvedUI
+			}
 			logLevel := "warning"
 			if cmd.Flags().Changed("log-level") {
 				logLevel = opts.logLevel
@@ -201,16 +244,13 @@ func newRunCmd() *cobra.Command {
 			for _, key := range []string{"external-controller-tls", "external-controller-unix", "external-controller-pipe"} {
 				delete(cfg, key)
 			}
+			warnInsecureController(cmd, "run", cfg)
 			secret, generated, err := ensureControllerSecret(cfg, "")
 			if err != nil {
 				return err
 			}
 			if generated {
 				logControllerSecret(cmd, "run", secret)
-			}
-			data, err := config.Marshal(cfg)
-			if err != nil {
-				return err
 			}
 
 			stateDir, err := os.MkdirTemp("", "cx-run-*")
@@ -220,6 +260,14 @@ func newRunCmd() *cobra.Command {
 			defer func() {
 				_ = os.RemoveAll(stateDir)
 			}()
+			panelURL, err := setupPanel(stateDir, cfg, uiSet, true, "run", cmd)
+			if err != nil {
+				return err
+			}
+			data, err := config.Marshal(cfg)
+			if err != nil {
+				return err
+			}
 			if err := validateConfig(stateDir, data); err != nil {
 				return err
 			}
@@ -241,6 +289,7 @@ func newRunCmd() *cobra.Command {
 			if err := core.CheckPortInUse(mixedAddress); err != nil {
 				return fmt.Errorf("mixed proxy failed to bind: %w", err)
 			}
+			logPanelURL(cmd, "run", panelURL)
 			if err := core.WaitReady(ctx, mixedAddress, core.DefaultReadyTimeout); err != nil {
 				return fmt.Errorf("proxy did not become ready: %w", err)
 			}
@@ -251,6 +300,7 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&controller, "controller", "", "external controller address (disabled when empty)")
+	addUIFlag(cmd, &uiAddr)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
@@ -260,7 +310,8 @@ func ensureControllerSecret(cfg map[string]any, fallback string) (string, bool, 
 		return secret, false, nil
 	}
 	controller, _ := cfg["external-controller"].(string)
-	if strings.TrimSpace(controller) == "" {
+	controllerTLS, _ := cfg["external-controller-tls"].(string)
+	if strings.TrimSpace(controller) == "" && strings.TrimSpace(controllerTLS) == "" {
 		return "", false, nil
 	}
 	if fallback != "" {
@@ -277,4 +328,109 @@ func ensureControllerSecret(cfg map[string]any, fallback string) (string, bool, 
 
 func logControllerSecret(cmd *cobra.Command, mode, secret string) {
 	fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: generated controller secret: %s\n", mode, secret)
+}
+
+func resolveUI(cmd *cobra.Command, flagValue string) (string, bool) {
+	if cmd.Flags().Changed("ui") {
+		return strings.TrimSpace(flagValue), strings.TrimSpace(flagValue) != ""
+	}
+	if value := strings.TrimSpace(os.Getenv("CX_UI")); value != "" {
+		return value, true
+	}
+	return "", false
+}
+
+func controllerEndpoints(cfg map[string]any) (main, tls string) {
+	main, _ = cfg["external-controller"].(string)
+	tls, _ = cfg["external-controller-tls"].(string)
+	return strings.TrimSpace(main), strings.TrimSpace(tls)
+}
+
+func warnInsecureController(cmd *cobra.Command, mode string, cfg map[string]any) {
+	if secret, ok := cfg["secret"].(string); ok && secret != "" {
+		return
+	}
+	main, tls := controllerEndpoints(cfg)
+	for _, address := range []string{main, tls} {
+		if address != "" && !isLoopbackAddress(address) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "WARNING: cx %s: controller %s is not loopback and no secret is configured; a random secret will be generated\n", mode, address)
+			return
+		}
+	}
+}
+
+func isLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return false
+	}
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func setupPanel(stateDir string, cfg map[string]any, allow, refresh bool, mode string, cmd *cobra.Command) (string, error) {
+	main, tls := controllerEndpoints(cfg)
+	if !allow || (main == "" && tls == "") {
+		return "", nil
+	}
+
+	externalUI, _ := cfg["external-ui"].(string)
+	if panelBundled() {
+		target := filepath.Join(stateDir, "ui")
+		if refresh {
+			extracted, err := extractPanel(stateDir)
+			if err != nil {
+				return "", fmt.Errorf("extract web panel: %w", err)
+			}
+			target = extracted
+		} else if _, err := os.Stat(filepath.Join(target, "index.html")); err != nil {
+			return "", fmt.Errorf("bundled web panel directory %q is missing", target)
+		}
+		cfg["external-ui"] = target
+		externalUI = target
+	}
+
+	if strings.TrimSpace(externalUI) == "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: web panel assets are not bundled in this build; controller API remains available\n", mode)
+		return "", nil
+	}
+	url, ok := panelURL(cfg)
+	if !ok {
+		return "", nil
+	}
+	return url, nil
+}
+
+func panelURL(cfg map[string]any) (string, bool) {
+	main, tls := controllerEndpoints(cfg)
+	address, scheme := main, "http"
+	if address == "" {
+		address, scheme = tls, "https"
+	}
+	if address == "" {
+		return "", false
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return scheme + "://" + address + "/ui/", true
+	}
+	switch host {
+	case "", "0.0.0.0":
+		host = "127.0.0.1"
+	case "::":
+		host = "::1"
+	}
+	return scheme + "://" + net.JoinHostPort(host, port) + "/ui/", true
+}
+
+func logPanelURL(cmd *cobra.Command, mode, panelURL string) {
+	if panelURL != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: web panel: %s\n", mode, panelURL)
+	}
 }

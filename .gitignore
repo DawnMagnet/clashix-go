@@ -8,3 +8,6 @@ coverage.out
 
 # Local module/build caches
 .cache/
+
+# Fetched web panel assets
+internal/ui/dist/

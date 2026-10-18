@@ -475,6 +475,11 @@ func TestEnsureControllerSecret(t *testing.T) {
 			wantGenerated: true,
 		},
 		{
+			name:          "TLS controller enabled generates one",
+			cfg:           map[string]any{"external-controller-tls": "127.0.0.1:9443"},
+			wantGenerated: true,
+		},
+		{
 			name:          "configured secret wins",
 			cfg:           map[string]any{"external-controller": "127.0.0.1:9090", "secret": "configured"},
 			wantSecret:    "configured",
@@ -620,5 +625,266 @@ func TestRunChildHonorsCanceledContext(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("child ran despite a canceled context: %v", err)
+	}
+}
+
+func TestServeGeneratesTLSControllerSecret(t *testing.T) {
+	useFakeCore(t)
+	state := t.TempDir()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mixed-port: 0\nexternal-controller-tls: 127.0.0.1:0\nmode: rule\nproxies: []\nrules:\n  - MATCH,DIRECT\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--config", configPath, "--dir", state})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	cfg, err := config.Load(config.DefaultConfigPath(state))
+	if err != nil {
+		t.Fatalf("Load served config: %v", err)
+	}
+	secret, ok := cfg["secret"].(string)
+	if !ok || secret == "" {
+		t.Fatalf("serve did not persist a TLS controller secret: %#v", cfg["secret"])
+	}
+	if !strings.Contains(stderr.String(), "generated controller secret: "+secret) {
+		t.Errorf("serve did not log the TLS controller secret: %q", stderr.String())
+	}
+}
+
+func TestRunUIFlagEnablesController(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--ui", "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil || lastFakeCore.config == nil {
+		t.Fatal("core did not receive a configuration")
+	}
+	if got := lastFakeCore.config["external-controller"]; got != "127.0.0.1:9090" {
+		t.Errorf("external-controller = %v, want 127.0.0.1:9090", got)
+	}
+	if secret, _ := lastFakeCore.config["secret"].(string); secret == "" {
+		t.Error("--ui did not generate a controller secret")
+	}
+	if !panelBundled() && !strings.Contains(stderr.String(), "web panel assets are not bundled") {
+		t.Errorf("run did not report an unbundled panel: %q", stderr.String())
+	}
+}
+
+func TestRunCXUIEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	t.Setenv("CX_UI", "127.0.0.1:19090")
+	root := NewRoot("dev")
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := lastFakeCore.config["external-controller"]; got != "127.0.0.1:19090" {
+		t.Errorf("external-controller = %v, want CX_UI value", got)
+	}
+}
+
+func TestRunCXSecretEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	t.Setenv("CX_SECRET", "from-environment")
+	root := NewRoot("dev")
+	root.SetArgs([]string{"run", "--config", writeConfig(t), "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if got := lastFakeCore.config["secret"]; got != "from-environment" {
+		t.Errorf("secret = %v, want environment value", got)
+	}
+}
+
+func TestSetupPanelWithBundledAssets(t *testing.T) {
+	oldBundled, oldExtract := panelBundled, extractPanel
+	panelBundled = func() bool { return true }
+	extractPanel = func(dir string) (string, error) {
+		target := filepath.Join(dir, "ui")
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(filepath.Join(target, "index.html"), []byte("<html>panel</html>"), 0o644); err != nil {
+			return "", err
+		}
+		return target, nil
+	}
+	t.Cleanup(func() {
+		panelBundled, extractPanel = oldBundled, oldExtract
+	})
+
+	dir := t.TempDir()
+	cfg := map[string]any{"external-controller": "127.0.0.1:9090"}
+	root := NewRoot("dev")
+	var stderr strings.Builder
+	root.SetErr(&stderr)
+	url, err := setupPanel(dir, cfg, true, true, "serve", root)
+	if err != nil {
+		t.Fatalf("setupPanel: %v", err)
+	}
+	if cfg["external-ui"] != filepath.Join(dir, "ui") {
+		t.Errorf("external-ui = %v", cfg["external-ui"])
+	}
+	if url != "http://127.0.0.1:9090/ui/" {
+		t.Errorf("panel URL = %q", url)
+	}
+}
+
+func TestPanelURL(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  map[string]any
+		want string
+	}{
+		{
+			name: "loopback HTTP",
+			cfg:  map[string]any{"external-controller": "127.0.0.1:9090"},
+			want: "http://127.0.0.1:9090/ui/",
+		},
+		{
+			name: "wildcard HTTP",
+			cfg:  map[string]any{"external-controller": "0.0.0.0:9090"},
+			want: "http://127.0.0.1:9090/ui/",
+		},
+		{
+			name: "TLS only",
+			cfg:  map[string]any{"external-controller-tls": "127.0.0.1:9443"},
+			want: "https://127.0.0.1:9443/ui/",
+		},
+		{
+			name: "disabled",
+			cfg:  map[string]any{},
+			want: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, _ := panelURL(test.cfg)
+			if got != test.want {
+				t.Errorf("panelURL = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackAddress(t *testing.T) {
+	tests := []struct {
+		address string
+		want    bool
+	}{
+		{"127.0.0.1:9090", true},
+		{"[::1]:9090", true},
+		{"localhost:9090", true},
+		{"0.0.0.0:9090", false},
+		{":9090", false},
+		{"192.0.2.1:9090", false},
+		{"example.test:9090", false},
+	}
+	for _, test := range tests {
+		if got := isLoopbackAddress(test.address); got != test.want {
+			t.Errorf("isLoopbackAddress(%q) = %v, want %v", test.address, got, test.want)
+		}
+	}
+}
+
+func TestWarnInsecureController(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      map[string]any
+		wantWarn bool
+	}{
+		{
+			name: "loopback without secret",
+			cfg:  map[string]any{"external-controller": "127.0.0.1:9090"},
+		},
+		{
+			name:     "non-loopback without secret",
+			cfg:      map[string]any{"external-controller": "0.0.0.0:9090"},
+			wantWarn: true,
+		},
+		{
+			name:     "TLS non-loopback without secret",
+			cfg:      map[string]any{"external-controller-tls": "192.0.2.1:9443"},
+			wantWarn: true,
+		},
+		{
+			name: "non-loopback with secret",
+			cfg:  map[string]any{"external-controller": "0.0.0.0:9090", "secret": "configured"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := NewRoot("dev")
+			var stderr strings.Builder
+			root.SetErr(&stderr)
+			warnInsecureController(root, "serve", test.cfg)
+			got := strings.Contains(stderr.String(), "WARNING")
+			if got != test.wantWarn {
+				t.Errorf("warning = %v, want %v (%q)", got, test.wantWarn, stderr.String())
+			}
+		})
+	}
+}
+
+func TestNormalizeUIArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "bare ui",
+			in:   []string{"run", "--ui", "--", "curl", "x"},
+			want: []string{"run", "--ui", "--", "curl", "x"},
+		},
+		{
+			name: "space separated address",
+			in:   []string{"run", "--ui", "127.0.0.1:9090", "--", "curl"},
+			want: []string{"run", "--ui=127.0.0.1:9090", "--", "curl"},
+		},
+		{
+			name: "equals form",
+			in:   []string{"run", "--ui=127.0.0.1:9090", "--", "curl"},
+			want: []string{"run", "--ui=127.0.0.1:9090", "--", "curl"},
+		},
+		{
+			name: "does not touch child args",
+			in:   []string{"run", "--", "echo", "--ui", "127.0.0.1:9090"},
+			want: []string{"run", "--", "echo", "--ui", "127.0.0.1:9090"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := normalizeUIArgs(test.in)
+			if strings.Join(got, "\x00") != strings.Join(test.want, "\x00") {
+				t.Errorf("normalizeUIArgs = %#v, want %#v", got, test.want)
+			}
+		})
 	}
 }

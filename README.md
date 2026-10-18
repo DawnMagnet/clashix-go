@@ -49,8 +49,25 @@ Requirements: Go 1.27 or newer. The binary is static; CGO is not needed.
 ```sh
 git clone https://github.com/DawnMagnet/clashix-go.git
 cd clashix-go
-CGO_ENABLED=0 go build -trimpath -o cx ./cmd/cx
+
+# Slim build without the web panel.
+CGO_ENABLED=0 go build \
+  -tags "no_zerotier no_easytier no_tailscale" \
+  -trimpath -o cx ./cmd/cx
+
+# Build with the bundled metacubexd panel.
+./scripts/fetch-ui.sh
+CGO_ENABLED=0 go build \
+  -tags "ui no_zerotier no_easytier no_tailscale" \
+  -trimpath -o cx ./cmd/cx
 ```
+
+A plain `go build ./cmd/cx` still compiles, but reports the panel as not bundled.
+The `no_zerotier no_easytier no_tailscale` tags drop the optional ZeroTier,
+EasyTier, and Tailscale outbounds; mainstream protocols (ss, ssr, vmess, vless,
+reality, trojan, hysteria, hysteria2, tuic, wireguard, socks5, http, snell,
+anytls) remain. Mihomo has no exclusion tags for mieru, SSH, AmneziaWG, or
+Wazero, so those heavy dependencies stay in the binary.
 
 ### Configuration sources
 
@@ -78,16 +95,27 @@ gracefully. On Unix, SIGHUP re-reads the configuration sources, validates the
 result, and applies it without replacing the last-good file until validation
 succeeds. `--sub-interval 6h` periodically refreshes subscriptions and reloads.
 
-When `external-controller` is enabled and the effective config has no secret,
+When any network controller endpoint (`external-controller` or
+`external-controller-tls`) is enabled and the effective config has no secret,
 `cx serve` generates a random controller secret at startup and prints it to
-stderr once so you can log in. A non-empty `secret` in the config or a
-`--secret` flag always wins. When the controller is disabled, no secret is
-added.
+stderr once so you can log in. A non-empty `secret` in the config, `CX_SECRET`,
+or `--secret` always wins. When no controller is enabled, no secret is added.
+Binding a non-loopback controller without a configured secret prints an
+additional warning.
+
+The built-in metacubexd panel is served at `/ui/` whenever a controller is
+enabled and the binary was built with `-tags ui`. `--ui` (or `CX_UI`) enables
+the controller and panel; `--ui` alone uses `127.0.0.1:9090`. The login URL is
+printed at startup. Panel version, checksum, and MIT license are recorded in
+[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
 cx serve --sub 'https://example.com/subscription' --sub-interval 12h
 cx serve --dir /var/lib/cx
+cx serve --ui                       # controller + panel on 127.0.0.1:9090
+cx serve --ui 0.0.0.0:9090 --secret 'choose-a-strong-secret'
+CX_UI=127.0.0.1:9090 CX_SECRET=... cx serve
 ```
 
 A systemd unit is provided at
@@ -125,10 +153,14 @@ temporary state directory is always removed.
 cx run --config direct.yaml -- curl https://example.com
 cx run --sub 'https://example.com/subscription' -- git clone https://example.com/repo.git
 cx run --log-level info --config direct.yaml -- bash
+cx run --ui --config direct.yaml -- curl http://127.0.0.1:9090/ui/
 ```
 
 Run-mode log level defaults to `warning`; core logs are written only to stderr.
-External controller access is disabled unless `--controller ADDR` is given.
+External controller access is disabled unless `--controller ADDR`, `--ui`, or
+`CX_UI` is given. `--ui` enables the controller and the bundled panel; `--ui`
+alone uses `127.0.0.1:9090`. As in `serve`, a missing secret is generated and
+printed once.
 
 ### Subscriptions
 
@@ -186,8 +218,10 @@ CGO_ENABLED=0 go build ./...
 ```
 
 CI covers Linux, macOS, and Windows tests plus cross-builds for
-linux/darwin/windows/freebsd `amd64`/`arm64` and linux `armv7`. Tagged releases
-build the same matrix with `-trimpath -ldflags "-s -w -X main.version=<tag>"`.
+linux/darwin/windows/freebsd `amd64`/`arm64` and linux `armv7`. CI and releases
+fetch the pinned panel and build with
+`-tags "ui no_zerotier no_easytier no_tailscale"`. Tagged releases use the same
+tags plus `-trimpath -ldflags "-s -w -X main.version=<tag>"`.
 
 ## 中文
 
@@ -235,8 +269,24 @@ Move-Item cx-windows-amd64.exe cx.exe
 ```sh
 git clone https://github.com/DawnMagnet/clashix-go.git
 cd clashix-go
-CGO_ENABLED=0 go build -trimpath -o cx ./cmd/cx
+
+# 不带内置面板的精简构建
+CGO_ENABLED=0 go build \
+  -tags "no_zerotier no_easytier no_tailscale" \
+  -trimpath -o cx ./cmd/cx
+
+# 带 metacubexd 面板的构建
+./scripts/fetch-ui.sh
+CGO_ENABLED=0 go build \
+  -tags "ui no_zerotier no_easytier no_tailscale" \
+  -trimpath -o cx ./cmd/cx
 ```
+
+普通 `go build ./cmd/cx` 仍可编译，但会提示面板未内置。
+`no_zerotier no_easytier no_tailscale` 会移除可选的 ZeroTier、EasyTier 和
+Tailscale 出站；主流协议（ss、ssr、vmess、vless、reality、trojan、hysteria、
+hysteria2、tuic、wireguard、socks5、http、snell、anytls）保留。mihomo 没有
+mieru、SSH、AmneziaWG、Wazero 的排除 tag，因此这些较重依赖仍会保留。
 
 ### 配置来源
 
@@ -261,14 +311,24 @@ mode、日志等级、控制器、secret）最后覆盖。如果以上来源都�
 会重新读取配置来源、校验后应用，校验成功前不会替换 last-good 文件。
 `--sub-interval 6h` 可定期刷新订阅并重载。
 
-启用 `external-controller` 且有效配置没有 secret 时，`cx serve` 会在启动时
-生成随机控制器 secret，并向 stderr 打印一次，方便登录。配置中的非空
-`secret` 或 `--secret` 参数始终优先。控制器未启用时不会添加 secret。
+启用任一网络控制器端点（`external-controller` 或 `external-controller-tls`）
+且有效配置没有 secret 时，`cx serve` 会在启动时生成随机控制器 secret，并向
+stderr 打印一次，方便登录。配置中的非空 `secret`、`CX_SECRET` 或 `--secret`
+参数始终优先。未启用控制器时不会添加 secret。若控制器绑定非 loopback 地址且
+未配置 secret，还会打印额外警告。
+
+启用控制器且二进制使用 `-tags ui` 构建时，内置 metacubexd 面板会通过 `/ui/`
+提供。`--ui`（或 `CX_UI`）会启用控制器和面板；单独使用 `--ui` 时地址为
+`127.0.0.1:9090`。启动时会打印登录 URL。面板版本、校验和与 MIT 许可证记录在
+[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md)。
 
 ```sh
 cx serve --config ~/.config/cx/config.yaml
 cx serve --sub 'https://example.com/subscription' --sub-interval 12h
 cx serve --dir /var/lib/cx
+cx serve --ui                       # 控制器 + 面板，127.0.0.1:9090
+cx serve --ui 0.0.0.0:9090 --secret 'choose-a-strong-secret'
+CX_UI=127.0.0.1:9090 CX_SECRET=... cx serve
 ```
 
 systemd 单元文件位于
@@ -305,10 +365,13 @@ launchctl kickstart -k gui/"$(id -u)"/com.dawnmagnet.cx
 cx run --config direct.yaml -- curl https://example.com
 cx run --sub 'https://example.com/subscription' -- git clone https://example.com/repo.git
 cx run --log-level info --config direct.yaml -- bash
+cx run --ui --config direct.yaml -- curl http://127.0.0.1:9090/ui/
 ```
 
 `run` 模式日志等级默认为 `warning`，核心日志只写 stderr。除非传入
-`--controller ADDR`，否则外部控制器关闭。
+`--controller ADDR`、`--ui` 或设置 `CX_UI`，否则外部控制器关闭。`--ui`
+会启用控制器和内置面板；单独使用 `--ui` 时地址为 `127.0.0.1:9090`。
+与 `serve` 一样，缺少 secret 时会自动生成并打印一次。
 
 ### 订阅
 
@@ -362,5 +425,6 @@ CGO_ENABLED=0 go build ./...
 ```
 
 CI 覆盖 Linux、macOS、Windows 测试，以及 linux/darwin/windows/freebsd
-`amd64`/`arm64` 与 linux `armv7` 交叉构建。打 tag 发布时使用
-`-trimpath -ldflags "-s -w -X main.version=<tag>"` 构建同一矩阵。
+`amd64`/`arm64` 与 linux `armv7` 交叉构建。CI 和发布流程会拉取固定版本面板，
+并使用 `-tags "ui no_zerotier no_easytier no_tailscale"` 构建。打 tag 发布时
+还使用 `-trimpath -ldflags "-s -w -X main.version=<tag>"`。
