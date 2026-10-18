@@ -53,6 +53,12 @@ All notable changes to this project are documented in this file.
   hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
   `PrivateTmp`). The launchd plist documents the reload command and the
   `KeepAlive`/`ThrottleInterval` equivalents.
+- Release builds for Linux `amd64`/`arm64`/`armv7` and Windows `amd64`/`arm64`
+  are compressed with pinned UPX 5.2.1 (`--best --lzma`). The UPX tarball is
+  SHA-256 verified against a hard-coded digest, and `upx -t` runs on every
+  compressed artifact before `SHA256SUMS` is generated. Darwin is left
+  uncompressed; FreeBSD is skipped because UPX 5.2.1 has no FreeBSD
+  `amd64`/`arm64` support.
 
 ### Security
 
@@ -99,6 +105,11 @@ All notable changes to this project are documented in this file.
   every reload. A requested TUN that fails to start makes startup exit non-zero;
   a failed TUN reload logs the error, re-applies the previous working config, and
   keeps serving.
+- macOS host-TUN detection is now conservative: it never auto-binds outbound
+  sockets, because `utun` devices are often system interfaces (iCloud Private
+  Relay) or VPN apps. When the effective default route is a `utun`, `cx` logs a
+  one-line hint to retry with `--interface en0` if proxy dials fail. Linux and
+  Windows still auto-bind to the physical default interface.
 - The systemd unit uses `Restart=always`; the launchd agent uses
   `KeepAlive=true`. Both retain reload support.
 - Normal `run`/`serve` shutdown suppresses mihomo's "Mihomo shutting down"
@@ -125,6 +136,10 @@ All notable changes to this project are documented in this file.
   similarity-based closest-candidate ranking.
 - Added an operations note that `systemd-run --on-active=...` timers restart
   their countdown after `systemctl daemon-reload`.
+- README (English and Chinese) documents which release targets are
+  UPX-compressed, how to restore an uncompressed binary (`upx -d` or build from
+  source), why UPX must not be run on packed binaries, and the macOS host-TUN
+  hint.
 
 ### Fixed
 
@@ -147,6 +162,8 @@ All notable changes to this project are documented in this file.
   all-select-groups behavior and list real proxy nodes instead of groups,
   `DIRECT`, or `REJECT`.
 - Launchd and systemd reload behavior is documented and wired consistently.
+- `cx pack` warns when the target binary already contains a payload and replaces
+  it instead of silently discarding the old payload.
 
 ## v0.1.0 - 2026-10-18
 

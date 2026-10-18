@@ -397,8 +397,14 @@ func TestServeKeepsAutoInterfaceOutOfStateConfig(t *testing.T) {
 	useFakeCore(t)
 	oldDetect := detectHostTun
 	t.Cleanup(func() { detectHostTun = oldDetect })
-	detectHostTun = func() (hostnet.Detection, bool) {
-		return hostnet.Detection{Tun: "Meta", Physical: "eth0"}, true
+	if runtime.GOOS == "darwin" {
+		detectHostTun = func() (hostnet.Detection, bool) {
+			return hostnet.Detection{Tun: "utun0", Physical: "en0"}, true
+		}
+	} else {
+		detectHostTun = func() (hostnet.Detection, bool) {
+			return hostnet.Detection{Tun: "Meta", Physical: "eth0"}, true
+		}
 	}
 
 	state := t.TempDir()
@@ -418,8 +424,20 @@ func TestServeKeepsAutoInterfaceOutOfStateConfig(t *testing.T) {
 	if lastFakeCore == nil {
 		t.Fatal("core did not receive a configuration")
 	}
-	if lastFakeCore.config["interface-name"] != "eth0" {
-		t.Fatalf("core config interface-name = %v, want eth0", lastFakeCore.config["interface-name"])
+	if runtime.GOOS == "darwin" {
+		if _, exists := lastFakeCore.config["interface-name"]; exists {
+			t.Fatalf("macOS auto-bound the core to %v", lastFakeCore.config["interface-name"])
+		}
+		if !strings.Contains(stderr.String(), "not auto-binding on macOS") || !strings.Contains(stderr.String(), "--interface en0") {
+			t.Errorf("serve did not log the macOS host-TUN hint: %q", stderr.String())
+		}
+	} else {
+		if lastFakeCore.config["interface-name"] != "eth0" {
+			t.Fatalf("core config interface-name = %v, want eth0", lastFakeCore.config["interface-name"])
+		}
+		if !strings.Contains(stderr.String(), "host TUN detected (dev Meta); binding outbound to eth0") {
+			t.Errorf("serve did not log the auto interface: %q", stderr.String())
+		}
 	}
 	cfg, err := config.Load(config.DefaultConfigPath(state))
 	if err != nil {
@@ -427,9 +445,6 @@ func TestServeKeepsAutoInterfaceOutOfStateConfig(t *testing.T) {
 	}
 	if _, exists := cfg["interface-name"]; exists {
 		t.Errorf("auto-detected interface-name leaked into the state config: %#v", cfg["interface-name"])
-	}
-	if !strings.Contains(stderr.String(), "host TUN detected (dev Meta); binding outbound to eth0") {
-		t.Errorf("serve did not log the auto interface: %q", stderr.String())
 	}
 }
 
@@ -589,6 +604,37 @@ func TestPackWarnsForSubscription(t *testing.T) {
 	}
 	if _, ok, err := payload.Read(output); err != nil || !ok {
 		t.Fatalf("packed output = %v, %v; want payload", ok, err)
+	}
+}
+
+func TestPackWarnsWhenTargetAlreadyPacked(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("fake-binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := writeConfig(t)
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+
+	runPack := func(output string, args ...string) string {
+		t.Helper()
+		root := NewRoot("dev")
+		var stderr strings.Builder
+		root.SetErr(&stderr)
+		root.SetArgs(append([]string{"pack", "-o", output, "--config", configPath}, args...))
+		if err := root.Execute(); err != nil {
+			t.Fatalf("pack: %v", err)
+		}
+		return stderr.String()
+	}
+	runPack(first, "--target-binary", target)
+	stderr := runPack(second, "--target-binary", first)
+	if !strings.Contains(stderr, "already contains a payload") {
+		t.Errorf("pack did not warn about the existing payload: %q", stderr)
+	}
+	if _, ok, err := payload.Read(second); err != nil || !ok {
+		t.Fatalf("repacked output = %v, %v; want payload", ok, err)
 	}
 }
 
@@ -865,7 +911,7 @@ func TestApplyAutoInterface(t *testing.T) {
 	cmd, opts := newCommand()
 	cfg := map[string]any{}
 	calls = 0
-	if !applyAutoInterface(cmd, "run", opts, cfg) {
+	if !applyAutoInterfaceForGOOS("linux", cmd, "run", opts, cfg) {
 		t.Fatal("auto interface was not applied")
 	}
 	if cfg["interface-name"] != "eth0" {
@@ -873,6 +919,23 @@ func TestApplyAutoInterface(t *testing.T) {
 	}
 	if !strings.Contains(cmd.ErrOrStderr().(*strings.Builder).String(), "host TUN detected (dev Meta); binding outbound to eth0") {
 		t.Errorf("missing auto interface log")
+	}
+
+	detectHostTun = func() (hostnet.Detection, bool) {
+		calls++
+		return hostnet.Detection{Tun: "utun0", Physical: "en0"}, true
+	}
+	cmd, opts = newCommand()
+	cfg = map[string]any{}
+	calls = 0
+	if applyAutoInterfaceForGOOS("darwin", cmd, "run", opts, cfg) {
+		t.Fatal("macOS auto interface was applied")
+	}
+	if _, exists := cfg["interface-name"]; exists {
+		t.Errorf("macOS added interface-name: %v", cfg["interface-name"])
+	}
+	if msg := cmd.ErrOrStderr().(*strings.Builder).String(); !strings.Contains(msg, "not auto-binding on macOS") || !strings.Contains(msg, "--interface en0") {
+		t.Errorf("missing macOS hint: %q", msg)
 	}
 
 	tests := []struct {
@@ -895,7 +958,7 @@ func TestApplyAutoInterface(t *testing.T) {
 				test.setup(cmd)
 			}
 			calls = 0
-			if applyAutoInterface(cmd, "run", opts, test.cfg) {
+			if applyAutoInterfaceForGOOS("linux", cmd, "run", opts, test.cfg) {
 				t.Fatal("auto interface unexpectedly applied")
 			}
 			if calls != 0 {

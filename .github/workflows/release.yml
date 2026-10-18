@@ -18,23 +18,32 @@ jobs:
         include:
           - os: linux
             arch: amd64
+            upx: true
           - os: linux
             arch: arm64
+            upx: true
           - os: linux
             arch: arm
             goarm: "7"
+            upx: true
           - os: darwin
             arch: amd64
+            upx: false
           - os: darwin
             arch: arm64
+            upx: false
           - os: windows
             arch: amd64
+            upx: true
           - os: windows
             arch: arm64
+            upx: true
           - os: freebsd
             arch: amd64
+            upx: false
           - os: freebsd
             arch: arm64
+            upx: false
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -69,6 +78,36 @@ jobs:
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o "dist/${name}" ./cmd/cx
           echo "name=${name}" >> "${GITHUB_OUTPUT}"
+
+      # UPX 5.2.1 supports linux/amd64, linux/arm64, linux/arm, win64/pe, and
+      # win64/arm64 PE. FreeBSD amd64/arm64 and darwin are intentionally skipped.
+      - name: Install pinned UPX
+        if: matrix.upx
+        shell: bash
+        env:
+          UPX_VERSION: "5.2.1"
+          UPX_SHA256: "402162aad30af47e60dbd767fb2e64ca394ace9727ba1f40283641f1d1b91657"
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          curl -fsSL --retry 3 -o "${archive}" \
+            "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          echo "${UPX_SHA256}  ${archive}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/upx"
+          tar -xJf "${archive}" -C "${RUNNER_TEMP}/upx"
+          echo "${RUNNER_TEMP}/upx/upx-${UPX_VERSION}-amd64_linux" >> "${GITHUB_PATH}"
+          "${RUNNER_TEMP}/upx/upx-${UPX_VERSION}-amd64_linux/upx" --version
+
+      - name: Compress with UPX
+        if: matrix.upx
+        shell: bash
+        env:
+          NAME: ${{ steps.build.outputs.name }}
+        run: |
+          set -euo pipefail
+          upx --best --lzma -q "dist/${NAME}"
+          upx -t "dist/${NAME}"
+          upx -l "dist/${NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6

@@ -18,6 +18,17 @@ Releases contain bare binaries plus `SHA256SUMS`:
 `cx-darwin-arm64`, `cx-windows-amd64.exe`, `cx-windows-arm64.exe`,
 `cx-freebsd-amd64`, `cx-freebsd-arm64`, and `SHA256SUMS`.
 
+Linux (`amd64`, `arm64`, `armv7`) and Windows (`amd64`, `arm64`) release
+binaries are compressed with UPX 5.2.1 (`--best --lzma`). macOS and FreeBSD
+artifacts are not compressed. To get an uncompressed binary, run
+`upx -d cx-linux-amd64` with UPX 5.2.1 (or build from source below); `upx -d`
+restores the executable from before compression. Packed binaries with an
+embedded config are never UPX-compressed. UPX reduces the download size at the
+cost of a decompression delay on every start; use `upx -d` or build from source
+when startup latency matters. Do not run UPX on a packed binary: UPX 5.2.1
+refuses a binary with an existing payload (`EOFException`) and leaves it
+unchanged, while overlay-stripping options would discard the payload.
+
 Linux/macOS:
 
 ```sh
@@ -307,17 +318,20 @@ third-party proxy.
 When TUN is not enabled, `cx` detects a host TUN on the effective route. On
 Linux this uses netlink `RTM_GETROUTE` lookups for `1.1.1.1` and
 `2606:4700:4700::1111`, so policy routing (for example sing-tun rules pointing
-at table 2022) is honored instead of only reading the main table. When the
-effective device is a TUN, the physical interface is taken from the main table
-(254) default route. macOS and Windows keep their platform routing-table
-readers. If `interface-name` and `routing-mark` are not already set, `cx` binds
-outbound sockets (including DNS) to the physical default interface and logs
-once to stderr:
+at table 2022) is honored instead of only reading the main table. Windows keeps
+its platform routing-table reader. When the effective device is a TUN, the
+physical interface is taken from the main table (254) default route. If
+`interface-name` and `routing-mark` are not already set, `cx` binds outbound
+sockets (including DNS) to the physical default interface and logs once to
+stderr:
 `cx run: host TUN detected (dev Meta); binding outbound to eth0`. This prevents
-a non-TUN `cx run` from being captured by another `cx serve --tun`. Use
-`--interface NAME` to force an interface, `--routing-mark N` to force a routing
-mark, and `--interface=` or `--no-auto-interface` to disable auto-detection.
-Detection failures are silent.
+a non-TUN `cx run` from being captured by another `cx serve --tun`. On macOS,
+`utun` devices are often created by the system (iCloud Private Relay) or VPN
+apps, so `cx` never auto-binds there; when the effective default route is a
+`utun`, it logs a one-line hint to retry with `--interface en0` if proxy dials
+fail. Use `--interface NAME` to force an interface, `--routing-mark N` to force
+a routing mark, and `--interface=` or `--no-auto-interface` to disable
+auto-detection. Detection failures are silent.
 
 #### Operations notes
 
@@ -448,6 +462,14 @@ fetch the pinned panel and build with
 `-tags "ui with_gvisor no_zerotier no_easytier no_tailscale"`. Tagged releases use the same
 tags plus `-trimpath -ldflags "-s -w -X main.version=<tag>"`.
 
+Tagged releases then install pinned UPX 5.2.1 (verified against a hard-coded
+SHA-256), compress the Linux `amd64`/`arm64`/`armv7` and Windows
+`amd64`/`arm64` artifacts with `--best --lzma`, and run `upx -t` on each one
+before generating `SHA256SUMS`. Darwin is left uncompressed because UPX changes
+the Mach-O layout and can interfere with codesigning; FreeBSD `amd64`/`arm64`
+is skipped because UPX 5.2.1 only supports FreeBSD `i386`. `cx pack` keeps the
+upstream binary as-is, so a packed binary is not additionally compressed.
+
 ## 中文
 
 `cx` 是一个静态 Go 二进制，以库的形式内嵌
@@ -463,6 +485,15 @@ Release 提供裸二进制文件和 `SHA256SUMS`：
 `cx-linux-amd64`、`cx-linux-arm64`、`cx-linux-arm`（armv7）、`cx-darwin-amd64`、
 `cx-darwin-arm64`、`cx-windows-amd64.exe`、`cx-windows-arm64.exe`、
 `cx-freebsd-amd64`、`cx-freebsd-arm64` 和 `SHA256SUMS`。
+
+Linux（`amd64`、`arm64`、`armv7`）和 Windows（`amd64`、`arm64`）发布二进制使用
+UPX 5.2.1（`--best --lzma`）压缩；macOS 与 FreeBSD 产物不压缩。要获得未压缩
+二进制，可使用 UPX 5.2.1 执行 `upx -d cx-linux-amd64`（或按下文从源码构建）；
+`upx -d` 会还原压缩前的可执行文件。带内嵌配置的打包产物不会使用 UPX 压缩。
+UPX 以每次启动时的解压延迟换取更小的下载体积；若在意启动延迟，可使用
+`upx -d` 或从源码构建。不要对打包后的二进制运行 UPX：UPX 5.2.1 会因已存在的
+payload 报 `EOFException` 并保持文件不变，而使用剥离 overlay 的选项会丢弃
+payload。
 
 Linux/macOS：
 
@@ -727,14 +758,15 @@ cx serve --config config.yaml --tun --tun-stack system \
 未启用 TUN 时，`cx` 会检测实际生效的路由是否经过宿主 TUN。Linux 上使用
 netlink `RTM_GETROUTE` 查询 `1.1.1.1` 和 `2606:4700:4700::1111`，因此
 sing-tun 指向 table 2022 之类的策略路由也能被识别，而不是只读主路由表。
-若实际出口是 TUN，则从主路由表（254）的默认路由取物理网卡。macOS 和 Windows
-继续使用各自的平台路由表读取逻辑。若配置中尚未设置
-`interface-name`/`routing-mark`，它会把出站套接字（包括 DNS）绑定到真实物理
-默认网卡，并向 stderr 打印一行：
+Windows 继续使用其平台路由表读取逻辑。若实际出口是 TUN，则从主路由表（254）
+的默认路由取物理网卡。若配置中尚未设置 `interface-name`/`routing-mark`，
+`cx` 会把出站套接字（包括 DNS）绑定到真实物理默认网卡，并向 stderr 打印一行：
 `cx run: host TUN detected (dev Meta); binding outbound to eth0`。这样非 TUN 的
-`cx run` 不会被另一个 `cx serve --tun` 再次捕获。可用 `--interface NAME` 强制
-指定网卡，用 `--routing-mark N` 强制指定路由标记，用 `--interface=` 或
-`--no-auto-interface` 关闭自动检测。检测失败时静默处理。
+`cx run` 不会被另一个 `cx serve --tun` 再次捕获。macOS 上 `utun` 设备常由系统
+（iCloud 私密中继）或 VPN 应用创建，因此 `cx` 不在 macOS 自动绑定；若实际默认
+路由是 `utun`，只打印一行提示：代理拨号失败时可重试 `--interface en0`。可用
+`--interface NAME` 强制指定网卡，用 `--routing-mark N` 强制指定路由标记，用
+`--interface=` 或 `--no-auto-interface` 关闭自动检测。检测失败时静默处理。
 
 #### 运维提示
 
@@ -852,3 +884,10 @@ CI 覆盖 Linux、macOS、Windows 测试，以及 linux/darwin/windows/freebsd
 `amd64`/`arm64` 与 linux `armv7` 交叉构建。CI 和发布流程会拉取固定版本面板，
 并使用 `-tags "ui with_gvisor no_zerotier no_easytier no_tailscale"` 构建。打 tag 发布时
 还使用 `-trimpath -ldflags "-s -w -X main.version=<tag>"`。
+
+打 tag 发布时还会安装固定版本 UPX 5.2.1（使用硬编码 SHA-256 校验），对 Linux
+`amd64`/`arm64`/`armv7` 与 Windows `amd64`/`arm64` 产物使用 `--best --lzma`
+压缩，并在生成 `SHA256SUMS` 前对每个产物执行 `upx -t`。Darwin 不压缩，因为
+UPX 会改变 Mach-O 布局，可能影响代码签名；FreeBSD `amd64`/`arm64` 跳过，
+因为 UPX 5.2.1 仅支持 FreeBSD `i386`。`cx pack` 产物保持上游二进制不变，
+不会再次压缩。

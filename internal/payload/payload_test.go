@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -34,6 +36,9 @@ func TestReadNonPackedBinary(t *testing.T) {
 	if files != nil {
 		t.Fatalf("files = %#v, want nil", files)
 	}
+	if has, err := Has(src); err != nil || has {
+		t.Fatalf("Has = %v, %v; want false without error", has, err)
+	}
 }
 
 func TestWriteAndReadPayload(t *testing.T) {
@@ -59,6 +64,9 @@ func TestWriteAndReadPayload(t *testing.T) {
 		}
 	}
 
+	if has, err := Has(dst); err != nil || !has {
+		t.Fatalf("Has = %v, %v; want true without error", has, err)
+	}
 	got, ok, err := Read(dst)
 	if err != nil {
 		t.Fatalf("Read: %v", err)
@@ -215,5 +223,79 @@ func TestReadMissingFile(t *testing.T) {
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) {
 		t.Logf("error is wrapped without os.PathError, which is acceptable: %v", err)
+	}
+}
+
+// TestUPXOverlayRoundTrip is a skip-if-no-upx test because CI does not install
+// UPX. It checks that a UPX-compressed binary still accepts an appended payload
+// and that a second UPX run cannot silently lose that payload.
+func TestUPXOverlayRoundTrip(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("release builds skip UPX on darwin")
+	}
+	upx, err := exec.LookPath("upx")
+	if err != nil {
+		t.Skip("upx not installed; skipping UPX overlay round trip")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	base := filepath.Join(dir, "cx-test")
+	copyExecutable(t, exe, base)
+	if output, err := exec.Command(upx, "-q", "-1", base).CombinedOutput(); err != nil {
+		t.Skipf("upx cannot compress the test binary: %v: %s", err, output)
+	}
+
+	packed := filepath.Join(dir, "cx-packed")
+	want := map[string][]byte{"config.yaml": []byte("mixed-port: 0\n")}
+	if err := Write(base, packed, want); err != nil {
+		t.Fatalf("Write after UPX: %v", err)
+	}
+	got, ok, err := Read(packed)
+	if err != nil || !ok || string(got["config.yaml"]) != string(want["config.yaml"]) {
+		t.Fatalf("Read after UPX = %#v, %v, %v; want payload", got, ok, err)
+	}
+	if has, err := Has(packed); err != nil || !has {
+		t.Fatalf("Has after UPX = %v, %v; want true", has, err)
+	}
+
+	before, err := os.ReadFile(packed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondErr := exec.Command(upx, "-q", "-1", packed).Run()
+	after, err := os.ReadFile(packed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondErr != nil && !bytes.Equal(before, after) {
+		t.Error("failed UPX run modified the packed binary")
+	}
+	got, ok, err = Read(packed)
+	if err != nil || !ok || string(got["config.yaml"]) != string(want["config.yaml"]) {
+		t.Fatalf("payload after second UPX run = %#v, %v, %v; want preserved payload", got, ok, err)
+	}
+}
+
+func copyExecutable(t *testing.T, src, dst string) {
+	t.Helper()
+	in, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		t.Fatal(err)
+	}
+	if err := out.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -45,6 +45,13 @@ func newPackCmd() *cobra.Command {
 				}
 				target = exe
 			}
+			alreadyPacked, err := payload.Has(target)
+			if err != nil {
+				return fmt.Errorf("inspect target binary %q: %w", target, err)
+			}
+			if alreadyPacked {
+				fmt.Fprintf(cmd.ErrOrStderr(), "cx pack: target binary %q already contains a payload; replacing it (the existing payload is not preserved; do not run upx on packed binaries).\n", target)
+			}
 
 			cfg, err := loadEffectiveConfig(cmd.Context(), &opts, opts.overlay(cmd), false, "")
 			if err != nil {

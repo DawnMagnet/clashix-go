@@ -318,6 +318,10 @@ var detectHostTun = hostnet.Detect
 // interface when the host's default route is captured by another TUN. It
 // returns true when it added the generated interface-name.
 func applyAutoInterface(cmd *cobra.Command, mode string, opts *configOptions, cfg map[string]any) bool {
+	return applyAutoInterfaceForGOOS(runtime.GOOS, cmd, mode, opts, cfg)
+}
+
+func applyAutoInterfaceForGOOS(goos string, cmd *cobra.Command, mode string, opts *configOptions, cfg map[string]any) bool {
 	if cfg == nil || tunEnabled(cfg) || opts.noAutoInterface {
 		return false
 	}
@@ -333,6 +337,15 @@ func applyAutoInterface(cmd *cobra.Command, mode string, opts *configOptions, cf
 	}
 	detection, ok := detectHostTun()
 	if !ok || detection.Physical == "" {
+		return false
+	}
+	if goos == "darwin" {
+		// utun devices on macOS are often created by the system (iCloud
+		// Private Relay) or VPN apps, so do not bind automatically. Leave a
+		// hint for when the proxy dials fail.
+		if strings.HasPrefix(strings.ToLower(detection.Tun), "utun") {
+			fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: host TUN detected (dev %s); not auto-binding on macOS (utun may be a system VPN or Private Relay); if proxy dials fail, retry with --interface %s\n", mode, detection.Tun, detection.Physical)
+		}
 		return false
 	}
 	cfg["interface-name"] = detection.Physical

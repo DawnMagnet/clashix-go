@@ -83,6 +83,26 @@ func Read(exePath string) (files map[string][]byte, ok bool, err error) {
 	return files, true, nil
 }
 
+// Has reports whether exePath has a payload trailer without reading the
+// payload contents. It is cheap enough to call before repacking a large binary.
+func Has(exePath string) (bool, error) {
+	file, err := os.Open(exePath)
+	if err != nil {
+		return false, fmt.Errorf("open executable %q: %w", exePath, err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Errorf("stat executable %q: %w", exePath, err)
+	}
+	_, found, err := locate(file, info.Size())
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 // Write copies srcExe to dstExe, removes an existing payload, appends files as
 // a tar payload, and leaves dstExe executable and private (mode 0700).
 func Write(srcExe, dstExe string, files map[string][]byte) error {
