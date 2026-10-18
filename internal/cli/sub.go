@@ -36,8 +36,15 @@ func newSubCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			data, err := config.Marshal(cfg)
+			if err != nil {
+				return err
+			}
+			if err := validateConfig(stateDir, data); err != nil {
+				return err
+			}
 			path := config.DefaultConfigPath(stateDir)
-			if err := config.Write(path, cfg); err != nil {
+			if err := config.WriteYAML(path, data); err != nil {
 				return err
 			}
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), path)

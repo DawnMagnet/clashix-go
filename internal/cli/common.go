@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
+	"github.com/DawnMagnet/clashix-go/internal/core"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
 	"github.com/spf13/cobra"
 )
@@ -21,6 +22,11 @@ type ExitError struct {
 func (e *ExitError) Error() string {
 	return fmt.Sprintf("child exited with status %d", e.Code)
 }
+
+var (
+	newCore        = core.New
+	validateConfig = core.Validate
+)
 
 type configOptions struct {
 	configPath         string
@@ -157,6 +163,7 @@ func loadEffectiveConfig(ctx context.Context, opts *configOptions, overlay confi
 		base = map[string]any{}
 	}
 	config.ApplyOverlay(base, overlay)
+	config.ApplyGeoXDefaults(base)
 	return base, nil
 }
 

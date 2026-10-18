@@ -390,3 +390,32 @@ func TestWriteYAMLRejectsInvalidAndKeepsActive(t *testing.T) {
 		t.Errorf("active config changed after rejected write: %#v", cfg)
 	}
 }
+
+func TestApplyGeoXDefaults(t *testing.T) {
+	t.Run("adds defaults", func(t *testing.T) {
+		cfg := map[string]any{}
+		ApplyGeoXDefaults(cfg)
+		urls, ok := cfg["geox-url"].(map[string]any)
+		if !ok {
+			t.Fatalf("geox-url = %#v, want mapping", cfg["geox-url"])
+		}
+		if urls["geoip"] != DefaultGeoXURL["geoip"] {
+			t.Errorf("geoip = %v", urls["geoip"])
+		}
+		if urls["mmdb"] != DefaultGeoXURL["mmdb"] {
+			t.Errorf("mmdb = %v", urls["mmdb"])
+		}
+	})
+
+	t.Run("preserves user value", func(t *testing.T) {
+		user := map[string]any{"geoip": "https://example.test/geoip.dat"}
+		cfg := map[string]any{"geox-url": user}
+		ApplyGeoXDefaults(cfg)
+		if cfg["geox-url"].(map[string]any)["geoip"] != "https://example.test/geoip.dat" {
+			t.Error("user geox-url was overwritten")
+		}
+		if len(cfg["geox-url"].(map[string]any)) != 1 {
+			t.Error("user geox-url gained default keys")
+		}
+	})
+}

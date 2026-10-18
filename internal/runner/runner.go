@@ -12,6 +12,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // DefaultGracePeriod is how long a child process group gets to exit after a
@@ -59,7 +61,8 @@ func (r *Runner) Run(ctx context.Context, name string, args []string) (int, erro
 	if cmd.Stderr == nil {
 		cmd.Stderr = os.Stderr
 	}
-	configureProcessGroup(cmd)
+	isolateGroup := shouldIsolateProcessGroup(cmd.Stdin)
+	configureProcessGroup(cmd, isolateGroup)
 
 	signalCh := make(chan os.Signal, 8)
 	signal.Notify(signalCh, forwardedSignals()...)
@@ -107,18 +110,23 @@ func (r *Runner) Run(ctx context.Context, name string, args []string) (int, erro
 			}
 			return -1, fmt.Errorf("wait for %q: %w", name, err)
 		case sig := <-signalCh:
+			// With a terminal on stdin the child shares our foreground process
+			// group, so the terminal has already delivered SIGINT to it.
+			if sig == os.Interrupt && !isolateGroup {
+				continue
+			}
 			// Best effort: the child may have exited between Wait and forwarding.
-			_ = signalProcessGroup(cmd.Process, sig)
+			_ = signalChild(cmd.Process, sig, isolateGroup)
 			if isTerminationSignal(sig) {
 				startGrace()
 			}
 		case <-graceC:
-			_ = killProcessGroup(cmd.Process)
+			_ = killChild(cmd.Process, isolateGroup)
 			graceC = nil
 		case <-ctxDone:
 			ctxDone = nil
 			// Best effort: the child may already be gone.
-			_ = signalProcessGroup(cmd.Process, syscall.SIGTERM)
+			_ = signalChild(cmd.Process, syscall.SIGTERM, isolateGroup)
 			startGrace()
 		}
 	}
@@ -126,4 +134,15 @@ func (r *Runner) Run(ctx context.Context, name string, args []string) (int, erro
 
 func isTerminationSignal(sig os.Signal) bool {
 	return sig == os.Interrupt || sig == syscall.SIGTERM
+}
+
+// shouldIsolateProcessGroup reports whether the child needs its own process
+// group. Interactive children must stay in cx's foreground group so terminal
+// job-control signals continue to work.
+func shouldIsolateProcessGroup(stdin io.Reader) bool {
+	file, ok := stdin.(*os.File)
+	if !ok {
+		return true
+	}
+	return !term.IsTerminal(int(file.Fd()))
 }

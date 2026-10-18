@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
@@ -13,63 +14,133 @@ import (
 
 func newServeCmd() *cobra.Command {
 	var (
-		dir  string
-		opts configOptions
+		dir         string
+		subInterval time.Duration
+		opts        configOptions
 	)
 
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Run the proxy service in the foreground",
-		Long:  "Run the proxy service in the foreground. Stop it with SIGINT or SIGTERM.",
+		Long:  "Run the proxy service in the foreground. Stop it with SIGINT or SIGTERM. On Unix, SIGHUP reloads the configuration sources.",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := opts.validatePorts(cmd); err != nil {
 				return err
+			}
+			if subInterval < 0 {
+				return fmt.Errorf("--sub-interval must not be negative")
 			}
 			stateDir, err := resolveStateDir(dir)
 			if err != nil {
 				return err
 			}
 			configPath := config.DefaultConfigPath(stateDir)
-
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
-
 			overlay := opts.overlay(cmd)
+
+			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stopSignals()
+
 			cfg, err := loadEffectiveConfig(ctx, &opts, overlay, true, configPath)
 			if err != nil {
 				return err
 			}
-			if _, err := config.EnsureSecret(cfg); err != nil {
+			secret, err := ensureSecret(cfg, "")
+			if err != nil {
 				return err
 			}
 			data, err := config.Marshal(cfg)
 			if err != nil {
 				return err
 			}
+			if err := validateConfig(stateDir, data); err != nil {
+				return err
+			}
 			if err := config.WriteYAML(configPath, data); err != nil {
 				return err
 			}
 
-			engine := core.New()
+			engine := newCore()
 			if err := engine.Start(ctx, stateDir, data); err != nil {
 				return fmt.Errorf("start core: %w", err)
 			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: configuration active in %s\n", stateDir)
 
-			<-ctx.Done()
-			if err := engine.Stop(); err != nil {
-				return fmt.Errorf("stop core: %w", err)
+			reload := func(reason string) {
+				newCfg, err := loadEffectiveConfig(ctx, &opts, opts.overlay(cmd), true, configPath)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) failed: %v\n", reason, err)
+					return
+				}
+				newSecret, err := ensureSecret(newCfg, secret)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) secret failed: %v\n", reason, err)
+					return
+				}
+				newData, err := config.Marshal(newCfg)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) encode failed: %v\n", reason, err)
+					return
+				}
+				if err := validateConfig(stateDir, newData); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) validation failed: %v\n", reason, err)
+					return
+				}
+				if err := config.WriteYAML(configPath, newData); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) save failed: %v\n", reason, err)
+					return
+				}
+				applier, ok := engine.(core.Applier)
+				if !ok {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) unsupported by core\n", reason)
+					return
+				}
+				if err := applier.Apply(stateDir, newData); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) apply failed: %v\n", reason, err)
+					return
+				}
+				secret = newSecret
+				fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reloaded configuration (%s)\n", reason)
 			}
-			return nil
+
+			reloadCh := make(chan os.Signal, 1)
+			if signals := reloadSignals(); len(signals) > 0 {
+				signal.Notify(reloadCh, signals...)
+				defer signal.Stop(reloadCh)
+			}
+			var tickerC <-chan time.Time
+			if subInterval > 0 {
+				ticker := time.NewTicker(subInterval)
+				defer ticker.Stop()
+				tickerC = ticker.C
+			}
+
+			for {
+				select {
+				case <-ctx.Done():
+					if err := engine.Stop(); err != nil {
+						return fmt.Errorf("stop core: %w", err)
+					}
+					return nil
+				case <-reloadCh:
+					reload("SIGHUP")
+				case <-tickerC:
+					reload("subscription interval")
+				}
+			}
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "state directory (default: user config directory/cx)")
+	cmd.Flags().DurationVar(&subInterval, "sub-interval", 0, "periodically refresh subscriptions and reload")
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
 
 func newRunCmd() *cobra.Command {
-	var opts configOptions
+	var (
+		opts       configOptions
+		controller string
+	)
 
 	cmd := &cobra.Command{
 		Use:   "run [flags] -- <command> [args...]",
@@ -81,10 +152,18 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
-			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-			defer stop()
+			ctx, stopSignals := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+			defer stopSignals()
 
 			overlay := opts.overlay(cmd)
+			if !cmd.Flags().Changed("port") {
+				overlay.Port = config.IntPtr(0)
+			}
+			if !cmd.Flags().Changed("socks-port") {
+				overlay.SocksPort = config.IntPtr(0)
+			}
+			overlay.ExternalController = config.StringPtr(controller)
+
 			mixedPort := opts.mixedPort
 			if !cmd.Flags().Changed("mixed-port") {
 				port, err := runnerFreePort()
@@ -99,7 +178,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, err := config.EnsureSecret(cfg); err != nil {
+			if _, err := ensureSecret(cfg, ""); err != nil {
 				return err
 			}
 			data, err := config.Marshal(cfg)
@@ -114,22 +193,45 @@ func newRunCmd() *cobra.Command {
 			defer func() {
 				_ = os.RemoveAll(stateDir)
 			}()
+			if err := validateConfig(stateDir, data); err != nil {
+				return err
+			}
 			if err := config.WriteYAML(config.DefaultConfigPath(stateDir), data); err != nil {
 				return err
 			}
 
-			engine := core.New()
+			engine := newCore()
 			if err := engine.Start(ctx, stateDir, data); err != nil {
 				return fmt.Errorf("start core: %w", err)
 			}
+			defer func() {
+				_ = engine.Stop()
+			}()
 
-			runErr := runChild(cmd, args, mixedPort)
-			if err := engine.Stop(); err != nil {
-				return fmt.Errorf("stop core: %w", err)
+			mixedAddress := fmt.Sprintf("127.0.0.1:%d", mixedPort)
+			if err := core.WaitReady(ctx, mixedAddress, core.DefaultReadyTimeout); err != nil {
+				return fmt.Errorf("proxy did not become ready: %w", err)
 			}
-			return runErr
+			return runChild(cmd, args, mixedPort)
 		},
 	}
+	cmd.Flags().StringVar(&controller, "controller", "", "external controller address (disabled when empty)")
 	addConfigFlags(cmd, &opts)
 	return cmd
+}
+
+func ensureSecret(cfg map[string]any, fallback string) (string, error) {
+	if secret, ok := cfg["secret"].(string); ok && secret != "" {
+		return secret, nil
+	}
+	if fallback != "" {
+		cfg["secret"] = fallback
+		return fallback, nil
+	}
+	secret, err := config.GenerateSecret()
+	if err != nil {
+		return "", err
+	}
+	cfg["secret"] = secret
+	return secret, nil
 }

@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,8 +15,61 @@ import (
 	"time"
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
+	"github.com/DawnMagnet/clashix-go/internal/core"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
 )
+
+var lastFakeCore *fakeCore
+
+type fakeCore struct {
+	listener net.Listener
+	config   map[string]any
+}
+
+func (f *fakeCore) Start(_ context.Context, _ string, cfg []byte) error {
+	parsed, err := config.Parse(cfg)
+	if err != nil {
+		return err
+	}
+	f.config = parsed
+	port, _ := parsed["mixed-port"].(int)
+	if port == 0 {
+		return nil
+	}
+	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		return err
+	}
+	f.listener = listener
+	return nil
+}
+
+func (f *fakeCore) Stop() error {
+	if f.listener == nil {
+		return nil
+	}
+	err := f.listener.Close()
+	f.listener = nil
+	return err
+}
+
+func (f *fakeCore) Apply(string, []byte) error { return nil }
+
+func useFakeCore(t *testing.T) {
+	t.Helper()
+	oldCore, oldValidate := newCore, validateConfig
+	newCore = func() core.Core {
+		fake := &fakeCore{}
+		lastFakeCore = fake
+		return fake
+	}
+	validateConfig = func(string, []byte) error { return nil }
+	t.Cleanup(func() {
+		newCore = oldCore
+		validateConfig = oldValidate
+		lastFakeCore = nil
+	})
+}
 
 func TestVersionCommand(t *testing.T) {
 	root := NewRoot("test-version")
@@ -71,6 +126,7 @@ func TestRunPropagatesExitCode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell exit test uses sh")
 	}
+	useFakeCore(t)
 	root := NewRoot("dev")
 	root.SetArgs([]string{"run", "--", "sh", "-c", "exit 7"})
 	err := root.Execute()
@@ -83,10 +139,42 @@ func TestRunPropagatesExitCode(t *testing.T) {
 	}
 }
 
+func TestRunOverridesPortsAndController(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell test uses sh")
+	}
+	useFakeCore(t)
+	root := NewRoot("dev")
+	root.SetArgs([]string{"run", "--", "sh", "-c", "exit 0"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil || lastFakeCore.config == nil {
+		t.Fatal("core did not receive a configuration")
+	}
+	cfg := lastFakeCore.config
+	if cfg["port"] != 0 {
+		t.Errorf("port = %v, want 0", cfg["port"])
+	}
+	if cfg["socks-port"] != 0 {
+		t.Errorf("socks-port = %v, want 0", cfg["socks-port"])
+	}
+	if cfg["external-controller"] != "" {
+		t.Errorf("external-controller = %v, want disabled", cfg["external-controller"])
+	}
+	if port, _ := cfg["mixed-port"].(int); port <= 0 {
+		t.Errorf("mixed-port = %v, want a selected port", cfg["mixed-port"])
+	}
+	if secret, _ := cfg["secret"].(string); secret == "" {
+		t.Error("run did not set a controller secret")
+	}
+}
+
 func TestRunExportsProxyEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell environment test uses sh")
 	}
+	useFakeCore(t)
 	root := NewRoot("dev")
 	var out strings.Builder
 	root.SetOut(&out)
@@ -163,6 +251,7 @@ func TestPackAndReadPayload(t *testing.T) {
 }
 
 func TestSubUpdateWritesStateConfig(t *testing.T) {
+	useFakeCore(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("port: 7890\nproxies:\n  - name: node\n    type: ss\n"))
 	}))
@@ -192,6 +281,7 @@ func TestSubUpdateWritesStateConfig(t *testing.T) {
 }
 
 func TestServeWritesConfigAndStops(t *testing.T) {
+	useFakeCore(t)
 	state := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -212,5 +302,35 @@ func TestServeWritesConfigAndStops(t *testing.T) {
 	secret, ok := cfg["secret"].(string)
 	if !ok || secret == "" {
 		t.Errorf("serve did not persist a random secret: %#v", cfg["secret"])
+	}
+}
+
+func TestSubUpdateValidationFailureKeepsActive(t *testing.T) {
+	useFakeCore(t)
+	validateConfig = func(string, []byte) error { return errors.New("invalid config") }
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("port: 7891\nproxies: []\nrules: [MATCH,DIRECT]\n"))
+	}))
+	defer server.Close()
+
+	state := t.TempDir()
+	path := config.DefaultConfigPath(state)
+	active := map[string]any{"port": 7890}
+	if err := config.Write(path, active); err != nil {
+		t.Fatal(err)
+	}
+
+	root := NewRoot("dev")
+	root.SetArgs([]string{"sub", "update", "--dir", state, "--sub", server.URL})
+	if err := root.Execute(); err == nil {
+		t.Fatal("sub update succeeded despite validation failure")
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg["port"] != 7890 {
+		t.Errorf("active config was replaced after validation failure: %#v", cfg)
 	}
 }

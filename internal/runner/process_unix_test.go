@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ func TestRunCancellationKillsAfterGrace(t *testing.T) {
 	}()
 
 	start := time.Now()
-	code, err := New(Options{GracePeriod: 100 * time.Millisecond}).Run(ctx, "sh", []string{"-c", "trap '' TERM; sleep 10"})
+	code, err := New(Options{Stdin: bytes.NewReader(nil), GracePeriod: 100 * time.Millisecond}).Run(ctx, "sh", []string{"-c", "trap '' TERM; sleep 10"})
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

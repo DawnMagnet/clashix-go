@@ -8,15 +8,20 @@ import (
 	"syscall"
 )
 
-func configureProcessGroup(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+func configureProcessGroup(cmd *exec.Cmd, isolate bool) {
+	if isolate {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
 }
 
 func forwardedSignals() []os.Signal {
 	return []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 }
 
-func signalProcessGroup(process *os.Process, sig os.Signal) error {
+func signalChild(process *os.Process, sig os.Signal, isolate bool) error {
+	if !isolate {
+		return process.Signal(sig)
+	}
 	signal, ok := sig.(syscall.Signal)
 	if !ok {
 		return process.Signal(sig)
@@ -24,7 +29,10 @@ func signalProcessGroup(process *os.Process, sig os.Signal) error {
 	return syscall.Kill(-process.Pid, signal)
 }
 
-func killProcessGroup(process *os.Process) error {
+func killChild(process *os.Process, isolate bool) error {
+	if !isolate {
+		return process.Kill()
+	}
 	return syscall.Kill(-process.Pid, syscall.SIGKILL)
 }
 
