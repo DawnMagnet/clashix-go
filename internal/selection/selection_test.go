@@ -164,6 +164,60 @@ func TestClosestRanksByMatchingWords(t *testing.T) {
 	}
 }
 
+func TestClosestRanksByProtocolThenGroupOrder(t *testing.T) {
+	matcher, err := newMatcher("type:anytls us")
+	if err != nil {
+		t.Fatalf("newMatcher: %v", err)
+	}
+	candidates := []nodeCandidate{
+		{name: "🇺🇸 US 02", kind: "Shadowsocks"},
+		{name: "🇺🇸 US 01", kind: "AnyTLS"},
+		{name: "🇺🇸 US 03", kind: "AnyTLS"},
+	}
+	got := closest(matcher, candidates, 3)
+	want := []string{"🇺🇸 US 01", "🇺🇸 US 03", "🇺🇸 US 02"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("closest = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestApplyBarePatternReportsUngroupedProxies(t *testing.T) {
+	testProxyMap(t,
+		[]map[string]any{
+			{"name": "🇺🇸 US 01", "type": "ss", "server": "198.51.100.10", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+			{"name": "🇺🇸 US 02", "type": "ss", "server": "198.51.100.20", "port": 443, "cipher": "aes-128-gcm", "password": "made-up"},
+		},
+		[]map[string]any{
+			{"name": "Proxy", "type": "select", "proxies": []any{"🇺🇸 US 01"}},
+		},
+	)
+	cfg := map[string]any{
+		"proxies": []any{
+			map[string]any{"name": "🇺🇸 US 01", "type": "ss"},
+			map[string]any{"name": "🇺🇸 US 02", "type": "ss"},
+		},
+		"proxy-groups": []any{
+			map[string]any{"name": "Proxy", "type": "select", "proxies": []any{"🇺🇸 US 01"}},
+		},
+	}
+	t.Cleanup(func() { tunnel.UpdateProxies(nil, nil) })
+
+	err := Apply(cfg, []string{"US 02"})
+	if err == nil {
+		t.Fatal("Apply succeeded without a select-group match")
+	}
+	for _, want := range []string{"matches 1 proxies that are not members of any select group", "🇺🇸 US 02", "closest candidates"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "🇺🇸 US 01, 🇺🇸 US 02") {
+		t.Errorf("error ranked a grouped proxy as an ungrouped match: %q", err)
+	}
+}
+
 func TestApplyRegionAndTypeSelection(t *testing.T) {
 	proxyMap := testProxyMap(t,
 		[]map[string]any{

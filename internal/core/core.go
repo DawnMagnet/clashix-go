@@ -179,10 +179,11 @@ func (m *Mihomo) startLocked(ctx context.Context, dir string, cfg []byte) error 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := hub.Parse(prepared); err != nil {
+	tunDetail, err := parseMihomoConfig(prepared, tunConfigured(parsed))
+	if err != nil {
 		return fmt.Errorf("start mihomo core: %w", err)
 	}
-	if err := checkTun(parsed); err != nil {
+	if err := checkTun(parsed, tunDetail); err != nil {
 		_ = shutdownCore()
 		return err
 	}
@@ -218,10 +219,11 @@ func (m *Mihomo) Apply(dir string, cfg []byte) error {
 	if err := selection.Validate(specs); err != nil {
 		return err
 	}
-	if err := hub.Parse(prepared); err != nil {
+	tunDetail, err := parseMihomoConfig(prepared, tunConfigured(parsed))
+	if err != nil {
 		return fmt.Errorf("apply mihomo config: %w", err)
 	}
-	if err := checkTun(parsed); err != nil {
+	if err := checkTun(parsed, tunDetail); err != nil {
 		return err
 	}
 	if err := selection.Apply(parsed, specs); err != nil {
@@ -260,15 +262,71 @@ func tunStack(cfg map[string]any) string {
 	return stack
 }
 
-func checkTun(cfg map[string]any) error {
+func checkTun(cfg map[string]any, detail string) error {
 	if !tunConfigured(cfg) || listener.GetTunConf().Enable {
 		return nil
 	}
-	stack := tunStack(cfg)
+	return tunFailure(tunStack(cfg), detail)
+}
+
+func tunFailure(stack, detail string) error {
 	if stack == "" {
 		stack = "unknown"
 	}
-	return fmt.Errorf("%w (stack %s): run as root or grant CAP_NET_ADMIN, ensure /dev/net/tun is available, and build with the with_gvisor tag for the gvisor/mixed stacks", ErrTunNotStarted, stack)
+	if detail == "" {
+		detail = "mihomo did not report a TUN error"
+	}
+	return fmt.Errorf("%w (stack %s): %s; possible causes: missing CAP_NET_ADMIN or root privileges; /dev/net/tun missing or blocked by a device cgroup/PrivateDevices; gvisor or mixed stack not compiled in (build with the with_gvisor tag)", ErrTunNotStarted, stack, detail)
+}
+
+// parseMihomoConfig applies prepared config and captures the underlying TUN
+// error that mihomo logs instead of returning it. Only TUN-enabled configs pay
+// attention to the log stream.
+func parseMihomoConfig(prepared []byte, watchTun bool) (string, error) {
+	if !watchTun {
+		return "", hub.Parse(prepared)
+	}
+	sub := mihomolog.Subscribe()
+	tunErrors := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		const prefix = "Start TUN listening error: "
+		for event := range sub {
+			if !strings.HasPrefix(event.Payload, prefix) {
+				continue
+			}
+			select {
+			case tunErrors <- strings.TrimSpace(strings.TrimPrefix(event.Payload, prefix)):
+			default:
+			}
+		}
+	}()
+
+	err := hub.Parse(prepared)
+	if err != nil {
+		mihomolog.UnSubscribe(sub)
+		<-done
+		return "", err
+	}
+	// A successful TUN start (or an unchanged TUN config) is visible in the
+	// listener state without waiting for the log event.
+	if listener.GetTunConf().Enable {
+		mihomolog.UnSubscribe(sub)
+		<-done
+		return "", nil
+	}
+
+	detail := ""
+	timer := time.NewTimer(500 * time.Millisecond)
+	select {
+	case detail = <-tunErrors:
+	case <-timer.C:
+	}
+	timer.Stop()
+	mihomolog.UnSubscribe(sub)
+	<-done
+	return detail, nil
 }
 
 func shutdownCore() error {

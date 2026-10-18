@@ -119,6 +119,11 @@ SPEC forms:
   group specs run after bare patterns and win, and only these errors name the
   selected group.
 
+Closest candidates are ranked by the number of shared words/aliases, then by a
+protocol (`type:`) match, then by the original group order. If a pattern matches
+proxies that exist under top-level `proxies` but are members of no select group,
+the error says so explicitly and lists them.
+
 A pattern starting with `re:` is a case-insensitive Go regular expression.
 Otherwise every whitespace-separated word must match the candidate name with a
 case-insensitive substring, except two-letter region codes, which must match a
@@ -243,27 +248,39 @@ TUN needs root or `CAP_NET_ADMIN`; binding mihomo's DNS listener on port 53
 additionally needs `CAP_NET_BIND_SERVICE`. The gVisor and mixed stacks require
 a build with the `with_gvisor` tag. For a systemd TUN deployment keep the
 hardening in [`packaging/systemd/cx.service`](packaging/systemd/cx.service) and
-add:
+install the drop-in instead of editing the unit:
 
-```ini
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-DeviceAllow=/dev/net/tun rw
-PrivateDevices=no
+```sh
+sudo install -d -m 0755 /etc/systemd/system/cx.service.d
+sudo install -m 0644 packaging/systemd/cx-tun.conf \
+  /etc/systemd/system/cx.service.d/tun.conf
+sudo systemctl daemon-reload
+sudo systemctl restart cx
 ```
 
+[`packaging/systemd/cx-tun.conf`](packaging/systemd/cx-tun.conf) sets
+`AmbientCapabilities`/`CapabilityBoundingSet` to
+`CAP_NET_ADMIN CAP_NET_BIND_SERVICE`, allows `/dev/net/tun` with
+`DeviceAllow=/dev/net/tun rw`, and sets `PrivateDevices=no`.
+
 `cx` checks mihomo's in-process TUN state after startup and after every reload.
-If TUN was requested but did not come up, startup logs a clear error and exits
-non-zero; a reload logs the error, re-applies the previous working
-configuration, and keeps the service alive.
+If TUN was requested but did not come up, startup logs the underlying mihomo
+error (for example `configure tun interface: operation not permitted`) and the
+likely causes (missing `CAP_NET_ADMIN`/root, a missing or blocked
+`/dev/net/tun` such as a device cgroup/`PrivateDevices`, or a gVisor/mixed stack
+that was not compiled in), then exits non-zero. A failed reload logs the error,
+re-applies the previous working configuration, and keeps the service alive.
 
 The flags are `--tun`, `--tun-stack system|gvisor|mixed`, and repeatable
 `--tun-exclude CIDR`; they override the config/override/`tun` section. On a
-public server, exclude private, link-local, CGNAT, and metadata ranges, and keep
-local/cloud names out of fake-IP. A ready-to-merge fragment with system stack,
-automatic routing/interface detection, private-range exclusions, fake-IP, and
-metadata/local-domain filters is in
-[`examples/override-tun-server.yaml`](examples/override-tun-server.yaml).
+public server, exclude private, loopback, link-local, multicast, broadcast,
+CGNAT, and metadata ranges, and keep local/cloud names out of fake-IP. A
+ready-to-merge fragment with system stack, automatic routing/interface
+detection, those route exclusions, fake-IP, and metadata/local-domain filters is
+in [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml).
+The example also documents adding provider-internal DNS/metadata addresses
+(for example Alibaba's `100.100.2.136`/`100.100.100.200`, Tencent's
+`183.60.83.19`, and `169.254.169.254`) and the host's own public IP.
 
 ```sh
 cx serve --config config.yaml --override examples/override-tun-server.yaml --tun
@@ -276,6 +293,16 @@ On public servers also exclude cloud metadata endpoints such as
 and use `fake-ip-filter` for `*.lan`, `*.local`, `+.localhost`, `+.internal`,
 and local/cloud domains. Never route cloud metadata traffic through a
 third-party proxy.
+
+When TUN is not enabled, `cx` detects a host TUN on the default route on Linux,
+macOS, and Windows. If `interface-name` and `routing-mark` are not already set,
+it binds outbound sockets (including DNS) to the physical default interface and
+logs once to stderr:
+`cx run: host TUN detected (dev Meta); binding outbound to eth0`. This prevents
+a non-TUN `cx run` from being captured by another `cx serve --tun`. Use
+`--interface NAME` to force an interface, `--routing-mark N` to force a routing
+mark, and `--interface=` or `--no-auto-interface` to disable auto-detection.
+Detection failures are silent.
 
 #### Operations notes
 
@@ -510,6 +537,10 @@ SPEC 形式：
 - `GROUP=PATTERN`：作用于名称匹配 `GROUP` 的选择组。精确组规则在裸模式之后
   执行，并且优先；只有这类错误会点名具体选择组。
 
+最接近候选的排序依次为：共享词/别名数量、协议（`type:`）匹配、原始组顺序。
+若模式匹配到存在于顶层 `proxies`、但不属于任何选择组的代理，错误信息会明确
+说明这一点并列出这些代理。
+
 以 `re:` 开头的模式是不区分大小写的 Go 正则；否则按空白拆分，每个词都必须
 不区分大小写地匹配候选名称的子串；但两字母地区代码必须作为完整 token 匹配，因此
 `us` 不会匹配 `plus`。地区词会展开为对应旗帜和代码别名：
@@ -623,25 +654,38 @@ secret 来自 `/etc/cx/cx.env` 中的 `CX_SECRET`（也可以使用 `--secret`�
 TUN 需要 root 或 `CAP_NET_ADMIN`；若 mihomo 的 DNS 监听绑定 53 端口，还需要
 `CAP_NET_BIND_SERVICE`。gVisor 和 mixed 栈要求构建时带 `with_gvisor` tag。
 systemd TUN 部署保留
-[`packaging/systemd/cx.service`](packaging/systemd/cx.service) 中的加固项，并添加：
+[`packaging/systemd/cx.service`](packaging/systemd/cx.service) 中的加固项，并
+安装 drop-in，而不是直接修改单元文件：
 
-```ini
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-DeviceAllow=/dev/net/tun rw
-PrivateDevices=no
+```sh
+sudo install -d -m 0755 /etc/systemd/system/cx.service.d
+sudo install -m 0644 packaging/systemd/cx-tun.conf \
+  /etc/systemd/system/cx.service.d/tun.conf
+sudo systemctl daemon-reload
+sudo systemctl restart cx
 ```
 
+[`packaging/systemd/cx-tun.conf`](packaging/systemd/cx-tun.conf) 将
+`AmbientCapabilities`/`CapabilityBoundingSet` 设为
+`CAP_NET_ADMIN CAP_NET_BIND_SERVICE`，用 `DeviceAllow=/dev/net/tun rw` 允许
+TUN 设备，并设置 `PrivateDevices=no`。
+
 `cx` 会在启动后和每次重载后检查 mihomo 进程内的 TUN 状态。若配置启用了 TUN
-但未成功启动：启动时打印明确错误并以非零状态退出；重载时打印错误、重新应用
+但未成功启动，启动时会打印 mihomo 的底层错误（例如
+`configure tun interface: operation not permitted`）以及可能原因（缺少
+`CAP_NET_ADMIN`/root、`/dev/net/tun` 不存在或被设备 cgroup/`PrivateDevices`
+阻止、未编译 gVisor/mixed 栈），并以非零状态退出；重载时打印错误、重新应用
 上一份可用配置，并保持服务运行。
 
 相关参数为 `--tun`、`--tun-stack system|gvisor|mixed` 和可重复的
 `--tun-exclude CIDR`；它们优先于配置、覆盖文件和 `tun` 段。公网服务器应排除
-私有、链路本地、CGNAT 和元数据地址段，并让本地/云域名不进入 fake-IP。
-可直接合并的配置片段见
+私有、loopback、链路本地、组播、广播、CGNAT 和元数据地址段，并让本地/云域名
+不进入 fake-IP。可直接合并的配置片段见
 [`examples/override-tun-server.yaml`](examples/override-tun-server.yaml)，包含
-system 栈、自动路由/网卡检测、私有网段排除、fake-IP 以及本地/元数据域名过滤。
+system 栈、自动路由/网卡检测、上述路由排除、fake-IP 以及本地/元数据域名过滤。
+示例还说明了如何按需加入云厂商内部 DNS/元数据地址（例如阿里云
+`100.100.2.136`/`100.100.100.200`、腾讯云 `183.60.83.19`、`169.254.169.254`）
+以及主机自身公网 IP。
 
 ```sh
 cx serve --config config.yaml --override examples/override-tun-server.yaml --tun
@@ -653,6 +697,14 @@ cx serve --config config.yaml --tun --tun-stack system \
 `100.100.100.200` 等云元数据端点，并用 `fake-ip-filter` 保护 `*.lan`、
 `*.local`、`+.localhost`、`+.internal` 及本地/云域名。不要把云元数据流量
 路由到第三方代理。
+
+未启用 TUN 时，`cx` 会在 Linux、macOS 和 Windows 上检测默认路由是否经过宿主
+TUN。若配置中尚未设置 `interface-name`/`routing-mark`，它会把出站套接字
+（包括 DNS）绑定到真实物理默认网卡，并向 stderr 打印一行：
+`cx run: host TUN detected (dev Meta); binding outbound to eth0`。这样非 TUN 的
+`cx run` 不会被另一个 `cx serve --tun` 再次捕获。可用 `--interface NAME` 强制
+指定网卡，用 `--routing-mark N` 强制指定路由标记，用 `--interface=` 或
+`--no-auto-interface` 关闭自动检测。检测失败时静默处理。
 
 #### 运维提示
 

@@ -2,6 +2,7 @@
 package selection
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"regexp"
@@ -246,23 +247,6 @@ func (m *matcher) termMatches(term, candidate, kind string) bool {
 	return wordMatches(term, candidate)
 }
 
-func (m *matcher) matchedWordCount(name, kind string) int {
-	if m.re != nil {
-		if m.re.MatchString(name) {
-			return 1
-		}
-		return 0
-	}
-	lower := strings.ToLower(name)
-	count := 0
-	for _, term := range m.terms {
-		if m.termMatches(term, lower, kind) {
-			count++
-		}
-	}
-	return count
-}
-
 // match applies the matcher to a candidate list in order.
 func (m *matcher) match(candidates []string) (string, bool) {
 	for _, candidate := range candidates {
@@ -423,7 +407,7 @@ func ApplyParsed(cfg map[string]any, specs []Spec) error {
 		if spec.Group != "" {
 			continue
 		}
-		if err := applyBarePattern(spec, groups, proxies, primary, targeted); err != nil {
+		if err := applyBarePattern(cfg, spec, groups, proxies, primary, targeted); err != nil {
 			return err
 		}
 	}
@@ -443,9 +427,11 @@ func ApplyParsed(cfg map[string]any, specs []Spec) error {
 	return applyPlaceholderDefaults(cfg, targeted)
 }
 
-func applyBarePattern(spec Spec, groups []groupInfo, proxies map[string]C.Proxy, primary string, targeted map[string]bool) error {
+func applyBarePattern(cfg map[string]any, spec Spec, groups []groupInfo, proxies map[string]C.Proxy, primary string, targeted map[string]bool) error {
 	if len(groups) == 0 {
-		return fmt.Errorf("no select proxy group found for node selection %q", spec.Pattern)
+		message := fmt.Sprintf("no select proxy group found for node selection %q", spec.Pattern)
+		message += ungroupedProxyNote(cfg, groups, spec.patternMatcher)
+		return errors.New(message)
 	}
 
 	type plan struct {
@@ -478,7 +464,9 @@ func applyBarePattern(spec Spec, groups []groupInfo, proxies map[string]C.Proxy,
 
 	if matched == 0 {
 		candidates := proxyCandidates(groups, proxies, "")
-		return fmt.Errorf("no proxy node in any select group matches %q; the selection applies to all select groups containing a matching node; closest candidates: %s", spec.Pattern, formatClosest(spec.patternMatcher, candidates, 5))
+		message := fmt.Sprintf("no proxy node in any select group matches %q; the selection applies to all select groups containing a matching node; closest candidates: %s", spec.Pattern, formatClosest(spec.patternMatcher, candidates, 5))
+		message += ungroupedProxyNote(cfg, groups, spec.patternMatcher)
+		return errors.New(message)
 	}
 
 	for _, plan := range plans {
@@ -492,6 +480,46 @@ func applyBarePattern(spec Spec, groups []groupInfo, proxies map[string]C.Proxy,
 		targeted[plan.group] = true
 	}
 	return nil
+}
+
+func ungroupedProxyNote(cfg map[string]any, groups []groupInfo, m *matcher) string {
+	members := make(map[string]struct{})
+	for _, group := range groups {
+		if group.kind != "select" {
+			continue
+		}
+		for _, name := range group.members {
+			members[name] = struct{}{}
+		}
+	}
+	var matches []string
+	for _, name := range configProxyNames(cfg) {
+		if _, grouped := members[name]; grouped {
+			continue
+		}
+		if m.matches(name) {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; matches %d proxies that are not members of any select group: %s", len(matches), strings.Join(matches, ", "))
+}
+
+func configProxyNames(cfg map[string]any) []string {
+	items := anySlice(cfg["proxies"])
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		mapping, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, ok := mapping["name"].(string); ok && name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 func applyToGroup(spec Spec, groupName string, proxies map[string]C.Proxy, targeted map[string]bool) error {
@@ -707,34 +735,31 @@ func formatClosest(m *matcher, candidates []nodeCandidate, limit int) string {
 	return strings.Join(names, ", ")
 }
 
-// closest ranks real proxy nodes by the number of matching words. Edit
-// distance is only a tie-breaker so unrelated nodes keep a stable order.
+// closest ranks candidates by shared words and aliases first, then protocol
+// (type:) matches, then the original group/member order.
 func closest(m *matcher, candidates []nodeCandidate, limit int) []string {
 	type scored struct {
 		name     string
-		matches  int
-		distance int
+		words    int
+		protocol int
 		order    int
 	}
 	scoredCandidates := make([]scored, 0, len(candidates))
 	for index, candidate := range candidates {
-		distance := 0
-		if m.re == nil {
-			distance = editDistance(normalizePattern(m.raw), strings.ToLower(candidate.name))
-		}
+		words, protocol := m.relevance(candidate.name, candidate.kind)
 		scoredCandidates = append(scoredCandidates, scored{
 			name:     candidate.name,
-			matches:  m.matchedWordCount(candidate.name, candidate.kind),
-			distance: distance,
+			words:    words,
+			protocol: protocol,
 			order:    index,
 		})
 	}
 	sort.SliceStable(scoredCandidates, func(i, j int) bool {
-		if scoredCandidates[i].matches != scoredCandidates[j].matches {
-			return scoredCandidates[i].matches > scoredCandidates[j].matches
+		if scoredCandidates[i].words != scoredCandidates[j].words {
+			return scoredCandidates[i].words > scoredCandidates[j].words
 		}
-		if scoredCandidates[i].distance != scoredCandidates[j].distance {
-			return scoredCandidates[i].distance < scoredCandidates[j].distance
+		if scoredCandidates[i].protocol != scoredCandidates[j].protocol {
+			return scoredCandidates[i].protocol > scoredCandidates[j].protocol
 		}
 		return scoredCandidates[i].order < scoredCandidates[j].order
 	})
@@ -748,36 +773,24 @@ func closest(m *matcher, candidates []nodeCandidate, limit int) []string {
 	return out
 }
 
-func normalizePattern(pattern string) string {
-	var out strings.Builder
-	for _, r := range strings.ToLower(pattern) {
-		if !unicode.IsSpace(r) {
-			out.WriteRune(r)
+func (m *matcher) relevance(name, kind string) (words, protocol int) {
+	if m.re != nil {
+		if m.re.MatchString(name) {
+			return 1, 0
 		}
+		return 0, 0
 	}
-	return out.String()
-}
-
-func editDistance(a, b string) int {
-	ar, br := []rune(a), []rune(b)
-	if len(ar) == 0 {
-		return len(br)
-	}
-	previous := make([]int, len(br)+1)
-	current := make([]int, len(br)+1)
-	for j := range previous {
-		previous[j] = j
-	}
-	for i := 1; i <= len(ar); i++ {
-		current[0] = i
-		for j := 1; j <= len(br); j++ {
-			cost := 0
-			if ar[i-1] != br[j-1] {
-				cost = 1
+	lower := strings.ToLower(name)
+	for _, term := range m.terms {
+		if strings.HasPrefix(term, "type:") {
+			if typeMatches(kind, term[len("type:"):]) {
+				protocol++
 			}
-			current[j] = min(previous[j]+1, current[j-1]+1, previous[j-1]+cost)
+			continue
 		}
-		previous, current = current, previous
+		if wordMatches(term, lower) {
+			words++
+		}
 	}
-	return previous[len(br)]
+	return words, protocol
 }

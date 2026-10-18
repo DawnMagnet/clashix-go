@@ -17,7 +17,9 @@ import (
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
+	"github.com/DawnMagnet/clashix-go/internal/hostnet"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
+	"github.com/spf13/cobra"
 )
 
 var lastFakeCore *fakeCore
@@ -391,6 +393,46 @@ func TestServeWritesConfigAndStops(t *testing.T) {
 	}
 }
 
+func TestServeKeepsAutoInterfaceOutOfStateConfig(t *testing.T) {
+	useFakeCore(t)
+	oldDetect := detectHostTun
+	t.Cleanup(func() { detectHostTun = oldDetect })
+	detectHostTun = func() (hostnet.Detection, bool) {
+		return hostnet.Detection{Tun: "Meta", Physical: "eth0"}, true
+	}
+
+	state := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	var stderr strings.Builder
+	root := NewRoot("dev")
+	root.SetErr(&stderr)
+	root.SetContext(ctx)
+	root.SetArgs([]string{"serve", "--config", writeConfig(t), "--dir", state})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if lastFakeCore == nil {
+		t.Fatal("core did not receive a configuration")
+	}
+	if lastFakeCore.config["interface-name"] != "eth0" {
+		t.Fatalf("core config interface-name = %v, want eth0", lastFakeCore.config["interface-name"])
+	}
+	cfg, err := config.Load(config.DefaultConfigPath(state))
+	if err != nil {
+		t.Fatalf("Load served config: %v", err)
+	}
+	if _, exists := cfg["interface-name"]; exists {
+		t.Errorf("auto-detected interface-name leaked into the state config: %#v", cfg["interface-name"])
+	}
+	if !strings.Contains(stderr.String(), "host TUN detected (dev Meta); binding outbound to eth0") {
+		t.Errorf("serve did not log the auto interface: %q", stderr.String())
+	}
+}
+
 func TestServeGeneratesControllerSecret(t *testing.T) {
 	useFakeCore(t)
 	state := t.TempDir()
@@ -685,6 +727,95 @@ func TestRunTunFlagOverlay(t *testing.T) {
 	routes, ok := tun["route-exclude-address"].([]any)
 	if !ok || len(routes) != 2 || routes[0] != "10.0.0.0/8" || routes[1] != "2001:db8::/32" {
 		t.Errorf("route-exclude-address = %#v", tun["route-exclude-address"])
+	}
+}
+
+func TestOutboundFlagsOverlay(t *testing.T) {
+	opts := &configOptions{}
+	cmd := &cobra.Command{}
+	addOutboundFlags(cmd, opts)
+	if err := cmd.Flags().Set("interface", " eth0 "); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("routing-mark", "123"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{"interface-name": "old", "routing-mark": 1}
+	config.ApplyOverlay(cfg, opts.overlay(cmd))
+	if cfg["interface-name"] != "eth0" || cfg["routing-mark"] != 123 {
+		t.Errorf("overlay = %#v, want trimmed interface and routing mark", cfg)
+	}
+
+	empty := &configOptions{}
+	emptyCmd := &cobra.Command{}
+	addOutboundFlags(emptyCmd, empty)
+	if err := emptyCmd.Flags().Set("interface", ""); err != nil {
+		t.Fatal(err)
+	}
+	emptyCfg := map[string]any{"interface-name": "old"}
+	config.ApplyOverlay(emptyCfg, empty.overlay(emptyCmd))
+	if emptyCfg["interface-name"] != "" {
+		t.Errorf("--interface= did not clear interface-name: %#v", emptyCfg)
+	}
+}
+
+func TestApplyAutoInterface(t *testing.T) {
+	oldDetect := detectHostTun
+	t.Cleanup(func() { detectHostTun = oldDetect })
+
+	calls := 0
+	detectHostTun = func() (hostnet.Detection, bool) {
+		calls++
+		return hostnet.Detection{Tun: "Meta", Physical: "eth0"}, true
+	}
+	newCommand := func() (*cobra.Command, *configOptions) {
+		cmd := &cobra.Command{}
+		opts := &configOptions{}
+		addOutboundFlags(cmd, opts)
+		cmd.SetErr(&strings.Builder{})
+		return cmd, opts
+	}
+
+	cmd, opts := newCommand()
+	cfg := map[string]any{}
+	calls = 0
+	if !applyAutoInterface(cmd, "run", opts, cfg) {
+		t.Fatal("auto interface was not applied")
+	}
+	if cfg["interface-name"] != "eth0" {
+		t.Errorf("interface-name = %v, want eth0", cfg["interface-name"])
+	}
+	if !strings.Contains(cmd.ErrOrStderr().(*strings.Builder).String(), "host TUN detected (dev Meta); binding outbound to eth0") {
+		t.Errorf("missing auto interface log")
+	}
+
+	tests := []struct {
+		name   string
+		cfg    map[string]any
+		setup  func(*cobra.Command)
+		called bool
+	}{
+		{name: "user interface", cfg: map[string]any{"interface-name": "wlan0"}},
+		{name: "user routing mark", cfg: map[string]any{"routing-mark": 99}},
+		{name: "tun enabled", cfg: map[string]any{"tun": map[string]any{"enable": true}}},
+		{name: "explicit empty interface", cfg: map[string]any{}, setup: func(cmd *cobra.Command) { _ = cmd.Flags().Set("interface", "") }},
+		{name: "explicit routing mark", cfg: map[string]any{}, setup: func(cmd *cobra.Command) { _ = cmd.Flags().Set("routing-mark", "0") }},
+		{name: "auto disabled", cfg: map[string]any{}, setup: func(cmd *cobra.Command) { _ = cmd.Flags().Set("no-auto-interface", "true") }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cmd, opts := newCommand()
+			if test.setup != nil {
+				test.setup(cmd)
+			}
+			calls = 0
+			if applyAutoInterface(cmd, "run", opts, test.cfg) {
+				t.Fatal("auto interface unexpectedly applied")
+			}
+			if calls != 0 {
+				t.Errorf("detection ran %d times, want 0", calls)
+			}
+		})
 	}
 }
 

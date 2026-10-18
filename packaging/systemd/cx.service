@@ -18,12 +18,12 @@ Restart=always
 RestartSec=5s
 LimitNOFILE=1048576
 
-# Hardening for ordinary proxy-only operation. For TUN mode add the following
-# (and keep PrivateDevices off; it is not enabled here):
-# AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-# CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-# DeviceAllow=/dev/net/tun rw
-# PrivateDevices=no
+# Hardening for ordinary proxy-only operation. For TUN mode install the
+# packaging/systemd/cx-tun.conf drop-in instead of editing this unit:
+#   sudo install -d -m 0755 /etc/systemd/system/cx.service.d
+#   sudo install -m 0644 packaging/systemd/cx-tun.conf \
+#     /etc/systemd/system/cx.service.d/tun.conf
+#   sudo systemctl daemon-reload && sudo systemctl restart cx
 # CAP_NET_ADMIN creates and routes the TUN device; CAP_NET_BIND_SERVICE lets
 # mihomo's DNS listener bind port 53.
 NoNewPrivileges=yes

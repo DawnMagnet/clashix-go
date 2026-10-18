@@ -75,8 +75,20 @@ func TestTunExampleMergesAndValidates(t *testing.T) {
 		t.Errorf("tun = %#v", tun)
 	}
 	routes, ok := tun["route-exclude-address"].([]any)
-	if !ok || len(routes) != 7 {
+	if !ok || len(routes) != 11 {
 		t.Errorf("route-exclude-address = %#v", tun["route-exclude-address"])
+	}
+	for _, want := range []string{"127.0.0.0/8", "224.0.0.0/4", "255.255.255.255/32", "ff00::/8"} {
+		found := false
+		for _, route := range routes {
+			if route == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("route-exclude-address is missing %s", want)
+		}
 	}
 	dns, ok := merged["dns"].(map[string]any)
 	if !ok || dns["enable"] != true || dns["enhanced-mode"] != "fake-ip" {
@@ -85,6 +97,25 @@ func TestTunExampleMergesAndValidates(t *testing.T) {
 	filters, ok := dns["fake-ip-filter"].([]any)
 	if !ok || len(filters) == 0 {
 		t.Errorf("fake-ip-filter = %#v", dns["fake-ip-filter"])
+	}
+}
+
+func TestTunFailureIncludesUnderlyingError(t *testing.T) {
+	err := tunFailure("system", "configure tun interface: operation not permitted")
+	if !errors.Is(err, ErrTunNotStarted) {
+		t.Fatalf("tunFailure error = %v, want ErrTunNotStarted", err)
+	}
+	for _, want := range []string{
+		"configure tun interface: operation not permitted",
+		"CAP_NET_ADMIN",
+		"root",
+		"/dev/net/tun",
+		"PrivateDevices",
+		"with_gvisor",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 

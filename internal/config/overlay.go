@@ -13,6 +13,8 @@ type Overlay struct {
 	LogLevel           *string
 	ExternalController *string
 	Secret             *string
+	InterfaceName      *string
+	RoutingMark        *int
 
 	TunEnable        *bool
 	TunStack         *string
@@ -54,6 +56,12 @@ func ApplyOverlay(cfg map[string]any, overlay Overlay) {
 	}
 	if overlay.Secret != nil {
 		cfg["secret"] = *overlay.Secret
+	}
+	if overlay.InterfaceName != nil {
+		cfg["interface-name"] = *overlay.InterfaceName
+	}
+	if overlay.RoutingMark != nil {
+		cfg["routing-mark"] = *overlay.RoutingMark
 	}
 	if overlay.TunEnable != nil || overlay.TunStack != nil || overlay.TunExcludeRoutes != nil {
 		tun := ensureMap(cfg, "tun")

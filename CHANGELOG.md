@@ -27,11 +27,20 @@ All notable changes to this project are documented in this file.
   repeatable `--tun-exclude CIDR`. They override `tun.enable`, `tun.stack`,
   `tun.auto-route`, `tun.auto-detect-interface`, and
   `tun.route-exclude-address`; CIDRs are validated before startup.
+- `serve` and `run` accept `--interface NAME`, `--routing-mark N`, and
+  `--no-auto-interface`. For non-TUN instances on Linux, macOS, and Windows,
+  `cx` detects when the effective default route uses a host TUN and binds
+  outbound sockets (including DNS) to the physical default interface unless
+  `interface-name`/`routing-mark` is already set. `--interface=` or
+  `--no-auto-interface` disables auto-detection.
+- Added the `packaging/systemd/cx-tun.conf` drop-in with `CAP_NET_ADMIN`,
+  `CAP_NET_BIND_SERVICE`, `/dev/net/tun` access, and `PrivateDevices=no`.
 - All CI, release, and documented builds now include the `with_gvisor` mihomo
   tag so the gVisor and mixed TUN stacks are available.
 - Added `examples/override-tun-server.yaml` with the system stack, automatic
-  routing/interface detection, private/metadata route exclusions, fake-IP, and
-  local/cloud fake-IP filters.
+  routing/interface detection, private/loopback/link-local/multicast/broadcast
+  route exclusions, fake-IP, and local/cloud fake-IP filters. Comments document
+  adding provider-internal DNS/metadata addresses and the host's public IP.
 - The systemd unit now has `ExecReload=/bin/kill -HUP $MAINPID`,
   `EnvironmentFile=-/etc/cx/cx.env`, `LimitNOFILE=1048576`, and proxy-only
   hardening (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
@@ -44,8 +53,10 @@ All notable changes to this project are documented in this file.
   a matching member and sets groups containing the final `MATCH` selector to it;
   other groups are left unchanged. Precise `GROUP=PATTERN` specs run afterwards
   and win. Bare selection only errors when no group contains a match, and then
-  lists actual proxy nodes ranked by matching words; group names appear only in
-  `GROUP=PATTERN` errors.
+  lists actual proxy nodes ranked by shared words/aliases, protocol (`type:`)
+  match, then group order; group names appear only in `GROUP=PATTERN` errors.
+  When the pattern matches top-level proxies that belong to no select group, the
+  error lists them explicitly.
 - Short region codes match whole tokens, so `us` does not match `plus`, and the
   fuzzy subsequence fallback was removed (it matched `trojan` to `🇹🇷TR 01`).
 - Ports `0` now disable listeners for `--port`, `--socks-port`, `--mixed-port`,
@@ -86,9 +97,11 @@ All notable changes to this project are documented in this file.
   secret, and `--sub-file`/`CX_SUB` supplied through `/etc/cx/cx.env`. The docs
   warn that subscriptions may set `allow-lan: true` and must not be trusted.
 - Documented TUN requirements (root or `CAP_NET_ADMIN`, plus
-  `CAP_NET_BIND_SERVICE` for DNS port 53), systemd capability/device settings,
-  public-server route exclusions, fake-IP filtering for local/cloud domains, and
-  the `with_gvisor` build tag.
+  `CAP_NET_BIND_SERVICE` for DNS port 53), installing the `cx-tun.conf` systemd
+  drop-in and running `daemon-reload`, public-server route exclusions,
+  provider-internal DNS/metadata addresses, fake-IP filtering for local/cloud
+  domains, the `with_gvisor` build tag, and the `--interface`/
+  `--routing-mark`/`--no-auto-interface` host-TUN workaround.
 - Added an operations note that `systemd-run --on-active=...` timers restart
   their countdown after `systemctl daemon-reload`.
 
@@ -98,7 +111,12 @@ All notable changes to this project are documented in this file.
   Go's default signal action; systemd now sees a live service and can apply the
   queued reload.
 - TUN startup failures are no longer silent: the core checks mihomo's listener
-  state and reports `mihomo TUN inbound did not start` with remediation hints.
+  state, captures mihomo's underlying error from its log stream, and reports
+  `mihomo TUN inbound did not start` with the actual cause plus remediation
+  hints (`CAP_NET_ADMIN`/root, `/dev/net/tun`, device cgroups/`PrivateDevices`,
+  or a gVisor/mixed stack that was not compiled in).
+- A non-TUN `cx run` no longer loops its outbound proxy connections back into a
+  host TUN; it binds to the physical default interface unless overridden.
 - Node-selection errors no longer say "primary group X"; they describe the
   all-select-groups behavior and list real proxy nodes instead of groups,
   `DIRECT`, or `REJECT`.

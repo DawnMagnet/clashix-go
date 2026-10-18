@@ -54,6 +54,9 @@ func newServeCmd() *cobra.Command {
 			if err := opts.validateTun(cmd); err != nil {
 				return err
 			}
+			if err := opts.validateOutbound(cmd); err != nil {
+				return err
+			}
 			if err := opts.prepare(cmd); err != nil {
 				return err
 			}
@@ -82,6 +85,7 @@ func newServeCmd() *cobra.Command {
 			if ctx.Err() != nil {
 				return nil
 			}
+			autoInterface := applyAutoInterface(cmd, "serve", &opts, cfg)
 			warnInsecureController(cmd, "serve", cfg)
 			secret, generated, err := ensureControllerSecret(cfg, "")
 			if err != nil {
@@ -101,7 +105,11 @@ func newServeCmd() *cobra.Command {
 			if err := validateConfig(stateDir, data); err != nil {
 				return err
 			}
-			if err := config.WriteYAML(configPath, data); err != nil {
+			stateData, err := marshalStateConfig(cfg, autoInterface)
+			if err != nil {
+				return err
+			}
+			if err := config.WriteYAML(configPath, stateData); err != nil {
 				return err
 			}
 
@@ -115,6 +123,7 @@ func newServeCmd() *cobra.Command {
 			fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: configuration active in %s\n", stateDir)
 			logPanelURL(cmd, "serve", panelURL)
 			lastGoodData := append([]byte(nil), data...)
+			lastGoodStateData := append([]byte(nil), stateData...)
 
 			reload := func(reason string) {
 				reloadOverlay := opts.overlay(cmd)
@@ -126,6 +135,7 @@ func newServeCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) failed: %v\n", reason, err)
 					return
 				}
+				newAutoInterface := applyAutoInterface(cmd, "serve", &opts, newCfg)
 				warnInsecureController(cmd, "serve", newCfg)
 				newSecret, generated, err := ensureControllerSecret(newCfg, secret)
 				if err != nil {
@@ -149,7 +159,12 @@ func newServeCmd() *cobra.Command {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) validation failed: %v\n", reason, err)
 					return
 				}
-				if err := config.WriteYAML(configPath, newData); err != nil {
+				newStateData, err := marshalStateConfig(newCfg, newAutoInterface)
+				if err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) encode failed: %v\n", reason, err)
+					return
+				}
+				if err := config.WriteYAML(configPath, newStateData); err != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) save failed: %v\n", reason, err)
 					return
 				}
@@ -163,7 +178,7 @@ func newServeCmd() *cobra.Command {
 					if errors.Is(err, core.ErrTunNotStarted) {
 						if rollbackErr := applier.Apply(stateDir, lastGoodData); rollbackErr != nil {
 							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback failed: %v\n", reason, rollbackErr)
-						} else if saveErr := config.WriteYAML(configPath, lastGoodData); saveErr != nil {
+						} else if saveErr := config.WriteYAML(configPath, lastGoodStateData); saveErr != nil {
 							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) TUN rollback could not restore %s: %v\n", reason, configPath, saveErr)
 						} else {
 							fmt.Fprintf(cmd.ErrOrStderr(), "cx serve: reload (%s) rolled back to previous working configuration\n", reason)
@@ -172,6 +187,7 @@ func newServeCmd() *cobra.Command {
 					return
 				}
 				lastGoodData = append([]byte(nil), newData...)
+				lastGoodStateData = append([]byte(nil), newStateData...)
 				secret = newSecret
 				if newPanelURL != "" && newPanelURL != panelURL {
 					panelURL = newPanelURL
@@ -208,6 +224,7 @@ func newServeCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&subInterval, "sub-interval", 0, "periodically refresh subscriptions and reload")
 	addUIFlag(cmd, &ui, &uiAddr)
 	addTunFlags(cmd, &opts)
+	addOutboundFlags(cmd, &opts)
 	addConfigFlags(cmd, &opts)
 	return cmd
 }
@@ -230,6 +247,9 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 			if err := opts.validateTun(cmd); err != nil {
+				return err
+			}
+			if err := opts.validateOutbound(cmd); err != nil {
 				return err
 			}
 			if err := opts.prepare(cmd); err != nil {
@@ -288,6 +308,7 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			applyAutoInterface(cmd, "run", &opts, cfg)
 			if !opts.allowLAN {
 				// run is temporary: it never exposes a LAN listener by default.
 				cfg["bind-address"] = "127.0.0.1"
@@ -357,8 +378,18 @@ func newRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&controller, "controller", "", "external controller address (disabled when empty)")
 	addUIFlag(cmd, &ui, &uiAddr)
 	addTunFlags(cmd, &opts)
+	addOutboundFlags(cmd, &opts)
 	addConfigFlags(cmd, &opts)
 	return cmd
+}
+
+func marshalStateConfig(cfg map[string]any, omitAutoInterface bool) ([]byte, error) {
+	if !omitAutoInterface {
+		return config.Marshal(cfg)
+	}
+	persisted := config.Clone(cfg)
+	delete(persisted, "interface-name")
+	return config.Marshal(persisted)
 }
 
 func ensureControllerSecret(cfg map[string]any, fallback string) (string, bool, error) {

@@ -135,6 +135,8 @@ func TestApplyOverlay(t *testing.T) {
 		LogLevel:           StringPtr("debug"),
 		ExternalController: StringPtr("127.0.0.1:9090"),
 		Secret:             StringPtr("s3cret"),
+		InterfaceName:      StringPtr("eth0"),
+		RoutingMark:        IntPtr(123),
 		TunEnable:          BoolPtr(true),
 		TunStack:           StringPtr("system"),
 		TunExcludeRoutes:   []string{"10.0.0.0/8", "fc00::/7"},
@@ -149,6 +151,8 @@ func TestApplyOverlay(t *testing.T) {
 		"log-level":           "debug",
 		"external-controller": "127.0.0.1:9090",
 		"secret":              "s3cret",
+		"interface-name":      "eth0",
+		"routing-mark":        123,
 		"unknown":             "keep",
 	}
 	for key, value := range want {

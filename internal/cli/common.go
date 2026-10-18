@@ -13,6 +13,7 @@ import (
 
 	"github.com/DawnMagnet/clashix-go/internal/config"
 	"github.com/DawnMagnet/clashix-go/internal/core"
+	"github.com/DawnMagnet/clashix-go/internal/hostnet"
 	"github.com/DawnMagnet/clashix-go/internal/payload"
 	"github.com/DawnMagnet/clashix-go/internal/selection"
 	"github.com/spf13/cobra"
@@ -51,6 +52,9 @@ type configOptions struct {
 	tun                bool
 	tunStack           string
 	tunExclude         []string
+	interfaceName      string
+	routingMark        int
+	noAutoInterface    bool
 	mode               string
 	logLevel           string
 	externalController string
@@ -87,6 +91,13 @@ func addTunFlags(cmd *cobra.Command, opts *configOptions) {
 	flags.StringArrayVar(&opts.tunExclude, "tun-exclude", nil, "exclude CIDR from TUN routes (repeatable; requires --tun)")
 }
 
+func addOutboundFlags(cmd *cobra.Command, opts *configOptions) {
+	flags := cmd.Flags()
+	flags.StringVar(&opts.interfaceName, "interface", "", "bind outbound sockets to this interface (--interface= disables auto-detection)")
+	flags.IntVar(&opts.routingMark, "routing-mark", 0, "set the routing mark on outbound sockets")
+	flags.BoolVar(&opts.noAutoInterface, "no-auto-interface", false, "do not auto-bind outbound sockets when a host TUN is detected")
+}
+
 func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 	changed := cmd.Flags().Changed
 	var overlay config.Overlay
@@ -121,6 +132,12 @@ func (opts *configOptions) overlay(cmd *cobra.Command) config.Overlay {
 		overlay.Secret = config.StringPtr(opts.secret)
 	} else if secret := os.Getenv("CX_SECRET"); secret != "" {
 		overlay.Secret = config.StringPtr(secret)
+	}
+	if changed("interface") {
+		overlay.InterfaceName = config.StringPtr(strings.TrimSpace(opts.interfaceName))
+	}
+	if changed("routing-mark") {
+		overlay.RoutingMark = config.IntPtr(opts.routingMark)
 	}
 	if changed("tun") {
 		overlay.TunEnable = config.BoolPtr(opts.tun)
@@ -164,6 +181,13 @@ func (opts *configOptions) validateTun(cmd *cobra.Command) error {
 			routes = append(routes, prefix.String())
 		}
 		opts.tunExclude = routes
+	}
+	return nil
+}
+
+func (opts *configOptions) validateOutbound(cmd *cobra.Command) error {
+	if cmd.Flags().Changed("routing-mark") && opts.routingMark < 0 {
+		return fmt.Errorf("--routing-mark must not be negative")
 	}
 	return nil
 }
@@ -275,6 +299,57 @@ func splitSelectionEnv(value string) []string {
 		}
 	}
 	return specs
+}
+
+var detectHostTun = hostnet.Detect
+
+// applyAutoInterface binds a non-TUN instance to the physical default
+// interface when the host's default route is captured by another TUN. It
+// returns true when it added the generated interface-name.
+func applyAutoInterface(cmd *cobra.Command, mode string, opts *configOptions, cfg map[string]any) bool {
+	if cfg == nil || tunEnabled(cfg) || opts.noAutoInterface {
+		return false
+	}
+	flags := cmd.Flags()
+	if flags.Changed("interface") || flags.Changed("routing-mark") {
+		return false
+	}
+	if name, ok := cfg["interface-name"].(string); ok && strings.TrimSpace(name) != "" {
+		return false
+	}
+	if routingMarkConfigured(cfg) {
+		return false
+	}
+	detection, ok := detectHostTun()
+	if !ok || detection.Physical == "" {
+		return false
+	}
+	cfg["interface-name"] = detection.Physical
+	fmt.Fprintf(cmd.ErrOrStderr(), "cx %s: host TUN detected (dev %s); binding outbound to %s\n", mode, detection.Tun, detection.Physical)
+	return true
+}
+
+func tunEnabled(cfg map[string]any) bool {
+	tun, ok := cfg["tun"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enabled, _ := tun["enable"].(bool)
+	return enabled
+}
+
+func routingMarkConfigured(cfg map[string]any) bool {
+	switch value := cfg["routing-mark"].(type) {
+	case int:
+		return value != 0
+	case int64:
+		return value != 0
+	case uint64:
+		return value != 0
+	case float64:
+		return value != 0
+	}
+	return false
 }
 
 // loadEffectiveConfig resolves the source order: embedded payload, explicit
