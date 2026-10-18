@@ -55,11 +55,11 @@ All notable changes to this project are documented in this file.
   `KeepAlive`/`ThrottleInterval` equivalents.
 - Release builds for Linux `amd64`/`arm64`/`armv7` and Windows `amd64`/`arm64`
   are compressed with pinned UPX 5.2.1 (`--best`). The UPX tarball is
-  LZMA is not used: it saved ~3 MB but raised startup time from ~0.2 s to ~1 s.
   SHA-256 verified against a hard-coded digest, and `upx -t` runs on every
   compressed artifact before `SHA256SUMS` is generated. Darwin is left
   uncompressed; FreeBSD is skipped because UPX 5.2.1 has no FreeBSD
   `amd64`/`arm64` support.
+  LZMA is not used: it saved ~3 MB but raised startup time from ~0.2 s to ~1 s.
 - `cx serve` implements pure-Go sd_notify for systemd `Type=notify`: `READY=1`
   after the core and any enabled TUN are up, `RELOADING=1` with
   `MONOTONIC_USEC` then `READY=1` around reloads, `STOPPING=1` on shutdown, and
